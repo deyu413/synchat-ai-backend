@@ -27,3 +27,5 @@ app.use((req, res, next) => { /* ... 404 ... */ });
 app.use((err, req, res, next) => { /* ... 500 ... */ });
 
 app.listen(PORT, () => { /* ... */ });
+// --- Manejo Errores ---
+// --- Manejo Errores ---
