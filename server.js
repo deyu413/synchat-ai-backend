@@ -1,31 +1,71 @@
-// server.js
-require('dotenv').config();
+// server.js (Actualizado con CORS configurado)
+require('dotenv').config(); // Cargar variables de .env al inicio
 const express = require('express');
-const cors = require('cors'); // <-- Importar cors
-
+const cors = require('cors'); // <--- 1. Importar cors
 const apiRoutes = require('./src/routes/api');
 
 const app = express();
 const PORT = process.env.PORT || 3001;
 
 // --- Middlewares ---
-app.use(cors()); // <-- ¡AÑADIR ESTO ANTES DE LAS RUTAS! Permite peticiones desde cualquier origen (para empezar)
-// Para más seguridad en producción, configura orígenes específicos:
-// app.use(cors({ origin: 'https://www.tudominio-synchatai.com' }));
 
+// 2. Configurar CORS para permitir peticiones DESDE tu dominio frontend
+//    ¡ASEGÚRATE que la URL sea EXACTAMENTE tu dominio donde está el widget!
+app.use(cors({
+  origin: 'https://www.synchatai.com'
+}));
+// Si necesitaras permitir múltiples orígenes (ej. localhost para desarrollo Y tu dominio):
+// const allowedOrigins = ['http://localhost:xxxx', 'https://www.synchatai.com'];
+// app.use(cors({
+//   origin: function (origin, callback) {
+//     if (!origin || allowedOrigins.indexOf(origin) !== -1) {
+//       callback(null, true)
+//     } else {
+//       callback(new Error('Not allowed by CORS'))
+//     }
+//   }
+// }));
+
+
+// Middlewares esenciales de Express (después de CORS)
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
 
-app.use((req, res, next) => { /* ... tu log ... */ next(); });
+// Middleware simple para loggear peticiones (opcional)
+app.use((req, res, next) => {
+    console.log(`${new Date().toISOString()} - ${req.method} ${req.path}`);
+    next();
+});
+
 
 // --- Rutas ---
-app.get('/', (req, res) => { /* ... */ });
-app.use('/api/chat', apiRoutes); // <-- CORS debe ir ANTES
 
-// --- Manejo Errores ---
-app.use((req, res, next) => { /* ... 404 ... */ });
-app.use((err, req, res, next) => { /* ... 500 ... */ });
+// Ruta de prueba básica para la raíz '/'
+app.get('/', (req, res) => {
+  res.status(200).send('¡Backend de SynChat AI funcionando correctamente!');
+});
 
-app.listen(PORT, () => { /* ... */ });
-// --- Manejo Errores ---
-// --- Manejo Errores ---
+// Usar las rutas de la API bajo el prefijo /api/chat
+// ¡IMPORTANTE! CORS debe ir ANTES de esto.
+app.use('/api/chat', apiRoutes);
+
+
+// --- Manejo de Errores (Al final) ---
+
+// Middleware para manejar rutas no encontradas (404)
+app.use((req, res, next) => {
+    res.status(404).json({ error: 'Ruta no encontrada' });
+});
+
+// Middleware para manejo de errores global
+app.use((err, req, res, next) => {
+    console.error("Error global no manejado:", err.stack || err);
+    // Evitar enviar detalles del error en producción por seguridad
+    res.status(500).json({ error: 'Error interno del servidor' });
+});
+
+
+// --- Iniciar el Servidor ---
+app.listen(PORT, () => {
+  console.log(`Servidor escuchando en el puerto ${PORT}`); // Quitamos localhost de aquí, Vercel usa otro sistema
+});
