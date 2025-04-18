@@ -1,47 +1,29 @@
 // server.js
-require('dotenv').config(); // Cargar variables de .env al inicio
+require('dotenv').config();
 const express = require('express');
+const cors = require('cors'); // <-- Importar cors
 
-// Importar las rutas de la API
-const apiRoutes = require('./src/routes/api'); // Asegúrate que la ruta al archivo es correcta
+const apiRoutes = require('./src/routes/api');
 
 const app = express();
 const PORT = process.env.PORT || 3001;
 
-// Middlewares esenciales de Express
-app.use(express.json()); // Para parsear body JSON
-app.use(express.urlencoded({ extended: true })); // Para parsear body URL-encoded
+// --- Middlewares ---
+app.use(cors()); // <-- ¡AÑADIR ESTO ANTES DE LAS RUTAS! Permite peticiones desde cualquier origen (para empezar)
+// Para más seguridad en producción, configura orígenes específicos:
+// app.use(cors({ origin: 'https://www.tudominio-synchatai.com' }));
 
-// Middleware simple para loggear peticiones (opcional)
-app.use((req, res, next) => {
-    console.log(`${new Date().toISOString()} - ${req.method} ${req.path}`);
-    next();
-});
+app.use(express.json());
+app.use(express.urlencoded({ extended: true }));
 
-// Ruta de prueba básica para la raíz '/'
-app.get('/', (req, res) => {
-  res.status(200).send('¡Backend de SynChat AI funcionando correctamente!');
-});
+app.use((req, res, next) => { /* ... tu log ... */ next(); });
 
-// Usar las rutas de la API bajo el prefijo /api/chat
-// Cualquier petición a /api/chat/... será manejada por apiRoutes
-app.use('/api/chat', apiRoutes);
+// --- Rutas ---
+app.get('/', (req, res) => { /* ... */ });
+app.use('/api/chat', apiRoutes); // <-- CORS debe ir ANTES
 
-// Middleware para manejar rutas no encontradas (404) - Debe ir después de tus rutas
-app.use((req, res, next) => {
-    res.status(404).json({ error: 'Ruta no encontrada' });
-});
+// --- Manejo Errores ---
+app.use((req, res, next) => { /* ... 404 ... */ });
+app.use((err, req, res, next) => { /* ... 500 ... */ });
 
-// Middleware para manejo de errores global - Debe ir al final
-app.use((err, req, res, next) => {
-    console.error("Error global no manejado:", err.stack);
-    res.status(500).json({ error: 'Error interno del servidor' });
-});
-
-
-// Iniciar el servidor
-app.listen(PORT, () => {
-  // Verifica si el pool de DB está listo (requiere exportar pool o una función de chequeo desde databaseService)
-  // Esto es opcional, pero da más seguridad de que todo está ok al arrancar.
-  console.log(`Servidor escuchando en http://localhost:${PORT}`);
-});
+app.listen(PORT, () => { /* ... */ });
