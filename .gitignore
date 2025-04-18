@@ -1,0 +1,46 @@
+# Dependencias de Node.js - ¡NUNCA subir esta carpeta!
+node_modules/
+
+# Archivo de Variables de Entorno - ¡Contiene secretos! ¡NUNCA subir!
+.env
+.env.*
+!.env.example
+
+# Archivos de Logs
+logs
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+lerna-debug.log*
+
+# Archivos de sistema operativo
+.DS_Store
+Thumbs.db
+
+# Archivos de configuración del editor/IDE (Opcional)
+.vscode/
+.idea/
+*.sublime-project
+*.sublime-workspace
+
+# Archivos de salida de builds (Si usaras TypeScript o similar más adelante)
+dist/
+build/
+out/
+
+# Archivos temporales o de caché
+.npm
+.yarn*
+*.tsbuildinfo
+.eslintcache
+
+# Reportes de cobertura de tests (Si añades tests más adelante)
+coverage/
+.nyc_output/
+
+# Otros archivos específicos (menos comunes)
+*.pid
+*.seed
+*.pid.lock
