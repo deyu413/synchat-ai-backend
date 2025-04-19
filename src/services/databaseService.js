@@ -201,37 +201,37 @@ const findRelevantKnowledge = async (clientId, questionVector, limit = 3, simila
     const distanceThreshold = 1 - similarityThreshold;
     
     // Log mejorado para depuración
-    console.log(`(DB Service) Buscando conocimiento relevante para cliente ${clientId} con umbral SIMILARIDAD >= ${similarityThreshold} (DISTANCIA < ${distanceThreshold})`); 
+ console.log(`(DB Service) Buscando conocimiento relevante para cliente ${clientId} con umbral SIMILARIDAD >= ${similarityThreshold} (DISTANCIA < ${distanceThreshold})`); 
 
-    if (!questionVector || questionVector.length === 0) {
+ if (!questionVector || questionVector.length === 0) {
         console.warn("(DB Service) Vector de pregunta vacío o inválido recibido en findRelevantKnowledge.");
         return []; // Devuelve array vacío si no hay vector
     }
-    
+
     // Convertir el array de JS a formato string de vector PostgreSQL
     const vectorString = '[' + questionVector.join(',') + ']'; 
     
     // Consulta SQL usando el operador de distancia coseno (<=>) de pgvector
-    const query = `
-        SELECT 
+const query = `
+SELECT 
             content_text
             /* , 1 - (content_vector <=> $2) AS similarity */ -- Descomentar para ver la puntuación exacta
-        FROM KnowledgeChunks
-        WHERE 
+FROM KnowledgeChunks
+ WHERE 
             client_id = $1                   -- Filtra por cliente
-          AND content_vector <=> $2 < $3     -- Filtra por distancia (vector <=> query_vector < distancia_maxima)
-        ORDER BY 
+ AND content_vector <=> $2 < $3     -- Filtra por distancia (vector <=> query_vector < distancia_maxima)
+ ORDER BY 
             content_vector <=> $2            -- Ordena por distancia (los más cercanos primero)
-        LIMIT $4                           -- Limita el número de resultados
-    `;
-    
+ LIMIT $4                           -- Limita el número de resultados
+ `;
+ 
     try {
         // Ejecutar la consulta pasando los parámetros correctos
-        const result = await pool.query(query, [clientId, vectorString, distanceThreshold, limit]); 
-        
+ const result = await pool.query(query, [clientId, vectorString, distanceThreshold, limit]); 
+
         // Mapear los resultados para obtener solo el texto
         const relevantTexts = result.rows.map(row => row.content_text);
-        
+ 
         // Loguear el resultado de la búsqueda
         console.log(`(DB Service) Encontrados ${relevantTexts.length} fragmentos relevantes con umbral ${similarityThreshold}.`);
         
@@ -240,22 +240,22 @@ const findRelevantKnowledge = async (clientId, questionVector, limit = 3, simila
         //     console.log(`(DB Service) Scores de similitud encontrados: ${result.rows.map(r => r.similarity.toFixed(4))}`); 
         // }
 
-        return relevantTexts; // Devolver los textos encontrados
+ return relevantTexts; // Devolver los textos encontrados
 
-    } catch (error) {
+ } catch (error) {
         // Manejo de errores específicos de pgvector/tabla
-         if (error.message.includes('type "vector" does not exist') || error.message.includes('relation "knowledgechunks" does not exist')) { 
+if (error.message.includes('type "vector" does not exist') || error.message.includes('relation "knowledgechunks" does not exist')) { 
             console.warn('(DB Service) Advertencia: Tabla KnowledgeChunks o extensión vector no encontrada. Asegúrate de que pgvector esté habilitado y la tabla exista.'); 
             return []; // Devolver vacío si la tabla/extensión falta
         }
-         if (error.message.includes('operator does not exist: vector <=> vector')) { 
+ if (error.message.includes('operator does not exist: vector <=> vector')) { 
             console.warn('(DB Service) Advertencia: Operador <=> de pgvector no encontrado. Asegúrate de que la extensión pgvector esté correctamente instalada y habilitada en Supabase.'); 
             return []; // Devolver vacío si el operador falta
         }
         // Error genérico
-        console.error(`(DB Service) Error durante la búsqueda vectorial para cliente ${clientId}:`, error);
-        return []; // Devolver array vacío en caso de otros errores
-    }
+ console.error(`(DB Service) Error durante la búsqueda vectorial para cliente ${clientId}:`, error);
+ return []; // Devolver array vacío en caso de otros errores
+ }
 };
 // --- FIN DE LA FUNCIÓN MODIFICADA ---
 
