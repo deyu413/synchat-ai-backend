@@ -69,3 +69,8 @@ app.use((err, req, res, next) => {
 app.listen(PORT, () => {
   console.log(`Servidor escuchando en el puerto ${PORT}`); // Quitamos localhost de aquí, Vercel usa otro sistema
 });
+
+// --- Iniciar el Servidor ---
+// --- Iniciar el Servidor ---
+// --- Iniciar el Servidor ---
+// --- Iniciar el Servidor ---
