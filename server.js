@@ -1,56 +1,76 @@
-// server.js (Prueba CORS con ruta directa y OPTIONS explícito)
-require('dotenv').config();
+// server.js (Actualizado con CORS configurado)
+require('dotenv').config(); // Cargar variables de .env al inicio
 const express = require('express');
-const cors = require('cors'); // Asegúrate que está instalado
+const cors = require('cors'); // <--- 1. Importar cors
+const apiRoutes = require('./src/routes/api');
 
 const app = express();
 const PORT = process.env.PORT || 3001;
 
-// 1. CORS global (debería manejar OPTIONS para rutas simples)
-app.use(cors());
+// --- Middlewares ---
 
-// 2. Otros middlewares necesarios
+// 2. Configurar CORS para permitir peticiones DESDE tu dominio frontend
+//    ¡ASEGÚRATE que la URL sea EXACTAMENTE tu dominio donde está el widget!
+app.use(cors({
+  origin: 'https://www.synchatai.com'
+}));
+// Si necesitaras permitir múltiples orígenes (ej. localhost para desarrollo Y tu dominio):
+// const allowedOrigins = ['http://localhost:xxxx', 'https://www.synchatai.com'];
+// app.use(cors({
+//   origin: function (origin, callback) {
+//     if (!origin || allowedOrigins.indexOf(origin) !== -1) {
+//       callback(null, true)
+//     } else {
+//       callback(new Error('Not allowed by CORS'))
+//     }
+//   }
+// }));
+
+
+// Middlewares esenciales de Express (después de CORS)
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
 
-// 3. Log de Peticiones
+// Middleware simple para loggear peticiones (opcional)
 app.use((req, res, next) => {
     console.log(`${new Date().toISOString()} - ${req.method} ${req.path}`);
     next();
 });
 
-// --- Rutas de Prueba Directas ---
 
-// Ruta Raíz (para verificar que el servidor responde)
+// --- Rutas ---
+
+// Ruta de prueba básica para la raíz '/'
 app.get('/', (req, res) => {
-  res.status(200).send('¡Backend de SynChat AI (Prueba CORS) funcionando!');
+  res.status(200).send('¡Backend de SynChat AI funcionando correctamente!');
 });
 
-// Manejar explícitamente OPTIONS para /api/chat/start
-// Esto aplica las opciones de cors() a la petición OPTIONS para esta ruta
-app.options('/api/chat/start', cors());
+// Usar las rutas de la API bajo el prefijo /api/chat
+// ¡IMPORTANTE! CORS debe ir ANTES de esto.
+app.use('/api/chat', apiRoutes);
 
-// Manejar POST para /api/chat/start
-app.post('/api/chat/start', cors(), (req, res) => { // Aplicar cors() aquí también puede ayudar
-  console.log('Llegó petición POST a /api/chat/start');
-  const { clientId } = req.body;
-  console.log('ClientId recibido:', clientId);
-  // Simular respuesta exitosa (sin DB por ahora)
-  res.status(201).json({ conversationId: 'test-start-ok-' + Date.now() });
-});
 
-// Por ahora no incluimos '/api/chat/message' ni apiRoutes
+// --- Manejo de Errores (Al final) ---
 
-// --- Manejo de Errores ---
+// Middleware para manejar rutas no encontradas (404)
 app.use((req, res, next) => {
-    res.status(404).json({ error: 'Ruta no encontrada en servidor de prueba' });
-});
-app.use((err, req, res, next) => {
-    console.error("Error global no manejado (Prueba CORS):", err.stack || err);
-    res.status(500).json({ error: 'Error interno del servidor (Prueba CORS)' });
+    res.status(404).json({ error: 'Ruta no encontrada' });
 });
 
-// --- Iniciar Servidor ---
-app.listen(PORT, () => {
-  console.log(`Servidor de PRUEBA CORS escuchando en puerto ${PORT}`);
+// Middleware para manejo de errores global
+app.use((err, req, res, next) => {
+    console.error("Error global no manejado:", err.stack || err);
+    // Evitar enviar detalles del error en producción por seguridad
+    res.status(500).json({ error: 'Error interno del servidor' });
 });
+
+
+// --- Iniciar el Servidor ---
+app.listen(PORT, () => {
+  console.log(`Servidor escuchando en el puerto ${PORT}`); // Quitamos localhost de aquí, Vercel usa otro sistema
+});
+
+// --- Iniciar el Servidor ---
+// --- Iniciar el Servidor ---
+// --- Iniciar el Servidor ---
+// --- Iniciar el Servidor ---
