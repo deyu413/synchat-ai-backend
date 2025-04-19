@@ -12,7 +12,7 @@ console.log('OPENAI_API_KEY:', process.env.OPENAI_API_KEY ? 'Encontrada' : '¡FA
 import OpenAI from 'openai';
 import { createClient } from '@supabase/supabase-js';
 import axios from 'axios'; // Usaremos axios para simplificar (en lugar de crawlee por ahora)
-import cheerio from 'cheerio'; // Necesitamos cheerio
+import * as cheerio from 'cheerio'; // Necesitamos cheerio
 
 // --- Inicialización de Clientes ---
 // (Asegúrate de que las variables de entorno están cargadas antes de estas líneas)
