@@ -1,7 +1,7 @@
-// server.js (Actualizado con CORS configurado)
+// server.js (Actualizado con CORS y Logs de diagnóstico)
 require('dotenv').config(); // Cargar variables de .env al inicio
 const express = require('express');
-const cors = require('cors'); // <--- 1. Importar cors
+const cors = require('cors'); // <--- Importar cors
 const apiRoutes = require('./src/routes/api');
 
 const app = express();
@@ -9,30 +9,19 @@ const PORT = process.env.PORT || 3001;
 
 // --- Middlewares ---
 
-// 2. Configurar CORS para permitir peticiones DESDE tu dominio frontend
-//    ¡ASEGÚRATE que la URL sea EXACTAMENTE tu dominio donde está el widget!
+// Configurar CORS para permitir peticiones DESDE tu dominio frontend
+// ¡ASEGÚRATE que la URL sea EXACTAMENTE tu dominio donde está el widget!
 app.use(cors({
-  origin: 'https://www.synchatai.com'
+    origin: 'https://www.synchatai.com'
 }));
-// Si necesitaras permitir múltiples orígenes (ej. localhost para desarrollo Y tu dominio):
-// const allowedOrigins = ['http://localhost:xxxx', 'https://www.synchatai.com'];
-// app.use(cors({
-//   origin: function (origin, callback) {
-//     if (!origin || allowedOrigins.indexOf(origin) !== -1) {
-//       callback(null, true)
-//     } else {
-//       callback(new Error('Not allowed by CORS'))
-//     }
-//   }
-// }));
-
 
 // Middlewares esenciales de Express (después de CORS)
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
 
-// Middleware simple para loggear peticiones (opcional)
+// Middleware simple para loggear peticiones (opcional pero útil)
 app.use((req, res, next) => {
+    // Este log ya existía, lo mantenemos
     console.log(`${new Date().toISOString()} - ${req.method} ${req.path}`);
     next();
 });
@@ -42,18 +31,21 @@ app.use((req, res, next) => {
 
 // Ruta de prueba básica para la raíz '/'
 app.get('/', (req, res) => {
-  res.status(200).send('¡Backend de SynChat AI funcionando correctamente!');
+    res.status(200).send('¡Backend de SynChat AI funcionando correctamente!');
 });
 
-// Usar las rutas de la API bajo el prefijo /api/chat
-// ¡IMPORTANTE! CORS debe ir ANTES de esto.
+// --- Montaje de rutas API con Logs de diagnóstico ---
+console.log('>>> server.js: ANTES de app.use /api/chat'); // LOG AÑADIDO
 app.use('/api/chat', apiRoutes);
+console.log('>>> server.js: DESPUÉS de app.use /api/chat'); // LOG AÑADIDO
 
 
 // --- Manejo de Errores (Al final) ---
 
 // Middleware para manejar rutas no encontradas (404)
 app.use((req, res, next) => {
+    // --- Log para diagnóstico 404 ---
+    console.log(`>>> server.js: Cayendo en MANEJADOR 404 para ${req.method} ${req.path}`); // LOG AÑADIDO
     res.status(404).json({ error: 'Ruta no encontrada' });
 });
 
@@ -67,10 +59,10 @@ app.use((err, req, res, next) => {
 
 // --- Iniciar el Servidor ---
 app.listen(PORT, () => {
-  console.log(`Servidor escuchando en el puerto ${PORT}`); // Quitamos localhost de aquí, Vercel usa otro sistema
+    console.log(`Servidor escuchando en el puerto ${PORT}`); // Quitamos localhost de aquí, Vercel usa otro sistema
 });
 
-// --- Iniciar el Servidor ---
-// --- Iniciar el Servidor ---
-// --- Iniciar el Servidor ---
-// --- Iniciar el Servidor ---
+// Exportar app puede ser necesario para algunos tests o configuraciones,
+// pero para el despliegue estándar en Vercel con server.js y listen, no suele hacer falta.
+// Si lo necesitas por otra razón, descomenta:
+// module.exports = app;

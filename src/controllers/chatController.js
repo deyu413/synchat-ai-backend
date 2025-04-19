@@ -1,5 +1,4 @@
 // src/controllers/chatController.js
-
 const openaiService = require('../services/openaiService');
 const databaseService = require('../services/databaseService');
 const embeddingService = require('../services/embeddingService');
@@ -33,9 +32,9 @@ const handleChatMessage = async (req, res, next) => { // Añadido next para mane
         console.log(`(Controller) Config cliente recuperada: ${clientConfig ? 'OK' : 'No encontrada'}`);
 
         if (!clientConfig) {
-             console.error(`Cliente no encontrado o sin configuración: ${clientId}`);
-             // Podrías decidir si fallar o continuar con un prompt genérico
-             // return res.status(404).json({ error: 'Cliente no configurado o no encontrado.'});
+            console.error(`Cliente no encontrado o sin configuración: ${clientId}`);
+            // Podrías decidir si fallar o continuar con un prompt genérico
+            // return res.status(404).json({ error: 'Cliente no configurado o no encontrado.'});
         }
         // Usar prompt base del cliente o uno por defecto si no existe
         const systemPrompt = clientConfig?.base_prompt || `Eres Zoe, un asistente virtual amable y servicial. Responde de forma concisa.`;
@@ -46,9 +45,9 @@ const handleChatMessage = async (req, res, next) => { // Añadido next para mane
             const knowledgeLimit = 3; // Máximo de fragmentos RAG a usar
             // El umbral se define por defecto en databaseService (actualmente 0.65)
             relevantKnowledge = await databaseService.findRelevantKnowledge(
-                clientId,
-                questionEmbedding,
-                knowledgeLimit
+                 clientId,
+                 questionEmbedding,
+                 knowledgeLimit
             );
         }
         // Formatear contexto RAG para el prompt
@@ -78,14 +77,14 @@ const handleChatMessage = async (req, res, next) => { // Añadido next para mane
              // Guardar mensajes en DB (no bloqueamos la respuesta al usuario por esto)
              // Usamos .catch aquí para loggear errores de guardado sin detener todo
             Promise.all([
-                databaseService.saveMessage(conversationId, 'user', message),
-                databaseService.saveMessage(conversationId, 'bot', botReplyText)
+                 databaseService.saveMessage(conversationId, 'user', message),
+                 databaseService.saveMessage(conversationId, 'bot', botReplyText)
             ]).catch(saveError => {
-                console.error(`Error no crítico al guardar mensajes para ${conversationId}:`, saveError);
+                 console.error(`Error no crítico al guardar mensajes para ${conversationId}:`, saveError);
             });
 
-            // Enviar respuesta de Zoe al widget
-            res.status(200).json({ reply: botReplyText });
+             // Enviar respuesta de Zoe al widget
+             res.status(200).json({ reply: botReplyText });
 
         } else {
              // Si OpenAI no dio respuesta válida
@@ -105,11 +104,14 @@ const handleChatMessage = async (req, res, next) => { // Añadido next para mane
  * Inicia una nueva conversación o recupera una existente si se pasa ID (aunque la ruta /start no lo usa).
  */
 const startConversation = async (req, res, next) => { // Añadido next
+    // --- Log para diagnóstico ---
+    console.log('>>> chatController.js: DENTRO de startConversation'); // LOG AÑADIDO
+
     try {
         const { clientId } = req.body;
         if (!clientId) {
-             console.warn('Petición inválida a /start. Falta clientId.');
-             return res.status(400).json({ error: 'Falta clientId.' });
+            console.warn('Petición inválida a /start. Falta clientId.');
+            return res.status(400).json({ error: 'Falta clientId.' });
         }
 
         // Verificar si el cliente existe antes de crear conversación (opcional pero buena idea)
