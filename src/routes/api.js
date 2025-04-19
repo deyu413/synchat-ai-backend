@@ -1,6 +1,12 @@
-// src/routes/api.js
+// En src/routes/api.js
 const express = require('express');
 const router = express.Router();
+const chatController = require('../controllers/chatController');
+console.log('>>> api.js: Cargando el router de API'); // <--- AÑADIR
+
+// ... definiciones de router.post ...
+
+module.exports = router;
 
 // Importar el controlador de chat
 const chatController = require('../controllers/chatController');
@@ -20,3 +26,4 @@ router.post('/message', chatController.handleChatMessage);
 
 // Exportamos el router para poder usarlo en server.js
 module.exports = router;
+
