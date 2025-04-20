@@ -11,12 +11,11 @@ const PORT = process.env.PORT || 3001;
 // --- Middlewares ---
 
 // Lista de orígenes permitidos
+// Cambia allowedOrigins a:
 const allowedOrigins = [
-    'https://www.synchatai.com',    // Tu dominio de producción
-    'https://synchatai.com',        // Tu dominio sin www (si aplica)
-    'http://localhost:3000',       // TU ORIGEN LOCAL (¡AJUSTA EL PUERTO SI ES DIFERENTE!)
-    'http://localhost:5173',       // Ejemplo con puerto 5173 de Vite (¡AJUSTA!)
-    // Añade más orígenes si los necesitas
+    'https://www.synchatai.com',
+    'https://synchatai.com',
+    'https://synchat-ai-backend.vercel.app' // ← ¡NUEVO! Añade tu dominio de Vercel
 ];
 
 const corsOptions = {
