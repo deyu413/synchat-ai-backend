@@ -50,6 +50,8 @@ const getEmbedding = async (text) => {
 
         if (embedding) {
              // Validación opcional de dimensión
+             // Validación opcional de dimensión
+             // Validación opcional de dimensión
              if(embedding.length !== EMBEDDING_DIMENSION){
                   console.warn(`(Embedding Service) Warning: La dimensión del embedding (${embedding.length}) no coincide con la esperada (${EMBEDDING_DIMENSION})`);
              }
