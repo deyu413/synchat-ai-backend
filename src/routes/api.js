@@ -1,21 +1,15 @@
-// src/routes/api.js (Convertido a ES Modules)
+// src/routes/api.js
 import express from 'express';
-// Importar funciones específicas del controlador
-import { handleChatMessage, startConversation } from '../controllers/chatController.js'; // <-- Necesita .js
+import { handleChatMessage, startConversation } from '../controllers/chatController.js';
 
-const router = express.Router();
+const router = express.Router(); // Usar router, NO app
 
 console.log('>>> api.js: Cargando el router de API');
 
-// POST /api/chat/start
-// Necesita recibir { clientId } en el body
-app.use('/api/chat', apiRoutes); // Esto parece correcto
+// Usar router.post, NO app.post
+router.post('/start', startConversation);
+router.post('/message', handleChatMessage);
 
-// POST /api/chat/message
-// Necesita recibir { clientId, conversationId, message } en el body
-app.get('/', (req, res) => { /* ... */ }); // Esto parece correcto
+// Otras rutas si las tienes, siempre con router.get, router.post, etc.
 
-// GET /api/chat/history?conversationId=... (Si la implementas)
-// router.get('/history', getHistoryHandler); // Necesitarías un manejador para esto
-
-export default router; // Usar export default
+export default router;
