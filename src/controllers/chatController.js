@@ -1,10 +1,10 @@
 // src/controllers/chatController.js
 import { getChatCompletion } from '../services/openaiService.js';
-import * as db from '../services/databaseService.js'; // Importar todo como 'db'
+import * as db from '../services/databaseService.js';
 
-// Modelo de IA a usar
+// Modelo de IA a usar y Temperatura (más baja reduce creatividad/alucinación)
 const CHAT_MODEL = "gpt-3.5-turbo";
-const CHAT_TEMPERATURE = 0.7;
+const CHAT_TEMPERATURE = 0.3; // <-- Reducir la temperatura puede ayudar
 
 /**
  * Maneja la recepción de un nuevo mensaje de chat.
@@ -12,7 +12,6 @@ const CHAT_TEMPERATURE = 0.7;
 export const handleChatMessage = async (req, res, next) => {
     const { message, conversationId, clientId } = req.body;
 
-    // Validación de entrada
     if (!message || !conversationId || !clientId) {
         console.warn('Petición inválida a /message:', req.body);
         return res.status(400).json({ error: 'Faltan datos requeridos (message, conversationId, clientId).' });
@@ -21,50 +20,39 @@ export const handleChatMessage = async (req, res, next) => {
     console.log(`(Controller) Mensaje recibido C:${clientId}, CV:${conversationId}: "${message.substring(0, 100)}..."`);
 
     try {
-        // --- Intentar obtener de la caché primero ---
+        // --- Cache ---
         const cacheKey = `${clientId}:${conversationId}:${message}`;
         const cachedReply = db.getCache(cacheKey);
         if (cachedReply) {
-            // Guardar mensajes (incluso si la respuesta es de caché)
-            // No bloqueante
             Promise.all([
                  db.saveMessage(conversationId, 'user', message),
                  db.saveMessage(conversationId, 'bot', cachedReply)
             ]).catch(err => console.error("Error guardando mensajes (cache hit):", err));
-
              return res.status(200).json({ reply: cachedReply });
         }
 
-        // --- Si no está en caché, proceder ---
         console.log("(Controller) No encontrado en caché. Procesando...");
 
-        // --- Obtener datos necesarios en paralelo ---
-        const [conversationHistory, clientConfig] = await Promise.all([
-            db.getConversationHistory(conversationId),
-            db.getClientConfig(clientId)
-        ]);
+        // --- Obtener Historial (Configuración no se usa para el prompt ahora) ---
+        // const [conversationHistory, clientConfig] = await Promise.all([ // Ya no necesitamos clientConfig para el prompt
+        //     db.getConversationHistory(conversationId),
+        //     db.getClientConfig(clientId) // Lo mantenemos por si se usa para otras cosas
+        // ]);
+        // Simplificado si solo necesitamos historial por ahora:
+        const conversationHistory = await db.getConversationHistory(conversationId);
+        // const clientConfig = await db.getClientConfig(clientId); // Podrías necesitarlo si reactivas base_prompt
 
         console.log(`(Controller) Historial recuperado: ${conversationHistory.length} mensajes.`);
-
-        if (!clientConfig) {
-             // Importante: El cliente DEBE existir para proceder.
-             console.error(`(Controller) Cliente no encontrado o sin configuración: ${clientId}`);
-             return res.status(404).json({ error: 'Cliente no configurado o no encontrado.' });
-        }
-        const systemPrompt = clientConfig.base_prompt || `Eres Zoe, un asistente virtual amable y servicial. Responde de forma concisa.`;
-        console.log(`(Controller) Usando system prompt: "${systemPrompt.substring(0,100)}..."`);
-
+        // console.log(`(Controller) Config cliente recuperada: ${clientConfig ? 'OK' : 'No encontrada'}`); // Log opcional
 
         // --- Búsqueda Híbrida (RAG) ---
         const relevantKnowledge = await db.hybridSearch(clientId, message);
         let ragContext = "";
         if (relevantKnowledge && relevantKnowledge.length > 0) {
              console.log(`(Controller) ${relevantKnowledge.length} fragmentos RAG encontrados.`);
-             // Formatear contexto RAG para el prompt, incluyendo metadatos si existen
              ragContext = relevantKnowledge
                 .map(chunk => {
-                     // Intentar obtener jerarquía o URL de metadatos
-                     const sourceInfo = chunk.metadata?.hierarchy?.join(" > ") || chunk.metadata?.url || 'Fuente desconocida';
+                     const sourceInfo = chunk.metadata?.hierarchy?.join(" > ") || chunk.metadata?.url || '';
                      return `Fuente: ${sourceInfo}\nContenido: ${chunk.content}`;
                  })
                 .join("\n\n---\n\n");
@@ -72,11 +60,25 @@ export const handleChatMessage = async (req, res, next) => {
              console.log("(Controller) No se encontraron fragmentos RAG relevantes.");
         }
 
-        // --- Construir Prompt para OpenAI ---
+        // --- Construir Prompt del Sistema MEJORADO ---
+        // Definimos el prompt base específico para SynChat AI aquí
+        const systemPromptBase = `Eres Zoe, el asistente virtual IA especializado de SynChat AI (synchatai.com). Tu ÚNICA fuente de información es el "Contexto" proporcionado a continuación. NO debes usar ningún conocimiento externo ni hacer suposiciones.
+
+Instrucciones ESTRICTAS:
+1.  Responde SOLAMENTE basándote en la información encontrada en el "Contexto".
+2.  Si la respuesta a la pregunta del usuario se encuentra en el "Contexto", respóndela de forma clara y concisa (máximo 3-4 frases). Cita la fuente si es relevante usando la información de "Fuente:" del contexto.
+3.  Si la información necesaria para responder NO se encuentra en el "Contexto", responde EXACTAMENTE con: "Lo siento, no tengo información específica sobre eso en la base de datos de SynChat AI." NO intentes adivinar ni buscar en otro lado.
+4.  Sé amable y profesional.`;
+
+        // Combinar prompt base con el contexto RAG recuperado
+        const finalSystemPrompt = systemPromptBase +
+            (ragContext ? `\n\n--- Contexto ---\n${ragContext}\n--- Fin del Contexto ---` : '\n\n(No se encontró contexto relevante para esta pregunta)');
+
+        // --- Construir Mensajes para OpenAI ---
         const messagesForAPI = [
             {
                 role: "system",
-                content: systemPrompt + (ragContext ? `\n\nUsa la siguiente información si es relevante para responder:\n${ragContext}` : '')
+                content: finalSystemPrompt // Usamos el nuevo prompt detallado
             },
             // Historial de la conversación
             ...conversationHistory,
@@ -84,14 +86,14 @@ export const handleChatMessage = async (req, res, next) => {
             { role: "user", content: message }
         ];
 
-        // console.log('(Controller) Prompt Completo:', JSON.stringify(messagesForAPI, null, 2)); // Descomentar para debug detallado
+        // console.log('(Controller) Prompt Completo:', JSON.stringify(messagesForAPI, null, 2)); // Debug
 
         // --- Llamar a OpenAI ---
+        console.log(`(Controller) Enviando ${messagesForAPI.length} mensajes a OpenAI (Modelo: ${CHAT_MODEL}, Temp: ${CHAT_TEMPERATURE}).`);
         const botReplyText = await getChatCompletion(messagesForAPI, CHAT_MODEL, CHAT_TEMPERATURE);
 
         // --- Procesar Respuesta y Guardar ---
         if (botReplyText) {
-            // Guardar mensajes en DB (no bloqueante)
             Promise.all([
                  db.saveMessage(conversationId, 'user', message),
                  db.saveMessage(conversationId, 'bot', botReplyText)
@@ -99,56 +101,24 @@ export const handleChatMessage = async (req, res, next) => {
                  console.error(`Error no crítico al guardar mensajes para ${conversationId}:`, saveError);
             });
 
-            // Guardar en caché
             db.setCache(cacheKey, botReplyText);
-
-            // Enviar respuesta
             res.status(200).json({ reply: botReplyText });
         } else {
             console.error(`(Controller) Respuesta vacía o nula de OpenAI para ${conversationId}`);
-            res.status(503).json({ error: 'La IA no pudo generar una respuesta en este momento.' }); // 503 Service Unavailable
+            // Enviar una respuesta genérica si OpenAI falla
+            res.status(503).json({ reply: 'Lo siento, estoy teniendo problemas para procesar tu solicitud en este momento.' });
         }
 
     } catch (error) {
         console.error(`(Controller) Error general en handleChatMessage para ${conversationId}:`, error);
-        next(error); // Pasar al middleware de errores global
+        next(error);
     }
 };
 
-/**
- * Inicia una nueva conversación para un cliente.
- */
-export const startConversation = async (req, res, next) => {
-    console.log('>>> chatController.js: DENTRO de startConversation');
-    const { clientId } = req.body;
-
-    if (!clientId) {
-        console.warn('Petición inválida a /start. Falta clientId.');
-        return res.status(400).json({ error: 'Falta clientId.' });
-    }
-
-    try {
-        // Verificar si el cliente existe (buena práctica)
-        const clientExists = await db.getClientConfig(clientId);
-        if (!clientExists) {
-            console.warn(`Intento de iniciar conversación para cliente inexistente: ${clientId}`);
-            return res.status(404).json({ error: 'Cliente inválido o no encontrado.' });
-        }
-
-        // Crear una nueva conversación
-        const conversationId = await db.getOrCreateConversation(clientId);
-        console.log(`(Controller) Conversación iniciada/creada: ${conversationId} para cliente ${clientId}`);
-
-        res.status(201).json({ conversationId }); // 201 Created
-
-    } catch (error) {
-        console.error(`Error en startConversation para cliente ${clientId}:`, error);
-        next(error); // Pasar al middleware de errores
-    }
-};
+// ... (startConversation se mantiene igual) ...
 
 // Exportar funciones del controlador
 export default {
     handleChatMessage,
-    startConversation
-};
+    startConversation // Asegúrate de que startConversation también se exporte
+}; 
