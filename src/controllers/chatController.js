@@ -141,4 +141,4 @@ export const handleChatMessage = async (req, res) => {
 };
 
 // Asegúrate de exportar ambas funciones si tu router las necesita así
-export default { handleChatMessage, startConversation };
+export { handleChatMessage, startConversation }; // Exportar como named exports

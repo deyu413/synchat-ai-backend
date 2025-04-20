@@ -1,6 +1,6 @@
 // src/routes/api.js
 import express from 'express';
-import { handleChatMessage, startConversation } from '../controllers/chatController.js';
+import { handleChatMessage, startConversation } from '../controllers/chatController.js'; // Correcto si usas named exports
 
 const router = express.Router(); // Usar router, NO app
 
