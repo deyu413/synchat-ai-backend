@@ -141,4 +141,4 @@ export default {
     handleChatMessage,
     startConversation // Ahora sí está definida antes de exportarla
 };
-// Ahora sí está definida antes de exportarla
+// Ahora sí está definida antes de exportarl
