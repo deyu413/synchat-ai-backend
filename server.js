@@ -1,3 +1,19 @@
+// server.js
+import 'dotenv/config';
+import express from 'express';
+import cors from 'cors';
+import apiRoutes from './src/routes/api.js'; // Asegúrate que la ruta sea correcta
+
+const app = express();
+const PORT = process.env.PORT || 3001;
+
+// --- Configuración CORS ---
+const allowedOrigins = [
+    /^https?:\/\/(.*\.)?synchatai\.com$/, // Todos los subdominios
+    /^https?:\/\/synchat-ai-backend\.vercel\.app$/, // Dominio de Vercel
+    process.env.NODE_ENV === 'development' ? /^http:\/\/localhost(:\d+)?$/ : null // Localhost en desarrollo
+].filter(Boolean); // Filtrar null si no estamos en desarrollo
+
 const corsOptions = {
     origin: (origin, callback) => {
         // Permite solicitudes sin 'origin' (como Postman, curl) o si el origen está en la lista
