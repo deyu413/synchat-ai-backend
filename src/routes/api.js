@@ -9,11 +9,11 @@ console.log('>>> api.js: Cargando el router de API');
 
 // POST /api/chat/start
 // Necesita recibir { clientId } en el body
-router.post('/start', startConversation); // Llama a la nueva función
+app.use('/api/chat', apiRoutes); // Esto parece correcto
 
 // POST /api/chat/message
 // Necesita recibir { clientId, conversationId, message } en el body
-router.post('/message', handleChatMessage); // Llama a la función existente
+app.get('/', (req, res) => { /* ... */ }); // Esto parece correcto
 
 // GET /api/chat/history?conversationId=... (Si la implementas)
 // router.get('/history', getHistoryHandler); // Necesitarías un manejador para esto
