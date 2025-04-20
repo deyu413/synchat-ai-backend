@@ -1,51 +1,57 @@
 // src/services/openaiService.js
-const OpenAI = require('openai');
+import OpenAI from 'openai';
+import 'dotenv/config';
 
-// Reintentar obtener la key aquí también por si acaso
-if (!process.env.OPENAI_API_KEY) {
+const apiKey = process.env.OPENAI_API_KEY;
+
+if (!apiKey) {
     console.error("¡Error Fatal! La variable de entorno OPENAI_API_KEY no está definida.");
-    // Podríamos lanzar un error para que no se inicie el servicio si falta
+    // Lanzar error para detener la aplicación si falta la clave
     throw new Error("OPENAI_API_KEY no definida.");
 }
 
-const openai = new OpenAI({
-    apiKey: process.env.OPENAI_API_KEY,
-});
+const openai = new OpenAI({ apiKey });
+
+console.log("(OpenAI Service) Cliente OpenAI inicializado.");
 
 /**
  * Obtiene una respuesta del modelo de chat de OpenAI.
  * @param {Array<object>} messages - Array de mensajes en formato OpenAI.
+ * @param {string} modelName - Nombre del modelo a usar (ej: "gpt-3.5-turbo").
+ * @param {number} temperature - Temperatura para la generación.
  * @returns {Promise<string|null>} - La respuesta del bot o null si hay error.
  */
-const getChatCompletion = async (messages) => {
-    console.log(`(OpenAI Service) Enviando ${messages.length} mensajes a la API...`);
+export const getChatCompletion = async (messages, modelName = "gpt-3.5-turbo", temperature = 0.7) => {
+    console.log(`(OpenAI Service) Enviando ${messages.length} mensajes a la API (Modelo: ${modelName}, Temp: ${temperature})...`);
     try {
         const completion = await openai.chat.completions.create({
-            model: "gpt-3.5-turbo", // Modelo económico para empezar
+            model: modelName,
             messages: messages,
-            temperature: 0.7, // Un equilibrio entre creatividad y determinación
-            // max_tokens: 500, // Limitar longitud de respuesta si es necesario
+            temperature: temperature,
+            // max_tokens: 500, // Considera añadir si necesitas limitar longitud
         });
+
+        // Loguear el uso de tokens (útil para control de costes)
+        if (completion.usage) {
+            console.log(`(OpenAI Service) Tokens Usados: Prompt=${completion.usage.prompt_tokens}, Completion=${completion.usage.completion_tokens}, Total=${completion.usage.total_tokens}`);
+        }
 
         const reply = completion.choices?.[0]?.message?.content?.trim();
 
         if (reply) {
-             console.log("(OpenAI Service) Respuesta recibida.");
+            console.log("(OpenAI Service) Respuesta recibida de la API.");
             return reply;
         } else {
-            console.error("(OpenAI Service) Respuesta inesperada de la API:", completion);
+            console.error("(OpenAI Service) Respuesta inesperada o vacía de la API:", JSON.stringify(completion, null, 2));
             return null;
         }
 
     } catch (error) {
-        console.error("(OpenAI Service) Error al llamar a la API de OpenAI:", error.message || error);
-        // Podríamos intentar identificar tipos de error (rate limit, auth, etc.)
-        // if (error.status === 429) { /* Rate limit */}
-        // if (error.status === 401) { /* Auth error */ }
+        console.error(`(OpenAI Service) Error al llamar a la API de OpenAI (${modelName}):`, error?.message || error);
+         // Puedes añadir manejo específico para ciertos códigos de estado si es necesario
+         // ej: if (error.status === 429) { ... } // Rate limit
         return null;
     }
 };
 
-module.exports = {
-    getChatCompletion,
-};
+// No necesitamos exportar el cliente directamente

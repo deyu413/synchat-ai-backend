@@ -1,181 +1,307 @@
 // src/scripts/ingestWebsite.js
-require('dotenv').config(); // Carga .env desde la raíz del proyecto
+import 'dotenv/config';
+import axios from 'axios';
+import { load } from 'cheerio'; // Importa solo la función 'load' nombrada
+import { createClient } from '@supabase/supabase-js'; // Importar directamente aquí
+import OpenAI from 'openai'; // Importar directamente aquí
 
-const axios = require('axios');
-const cheerio = require('cheerio');
-// Asegúrate de que las rutas a los servicios sean correctas desde aquí
-const embeddingService = require('../services/embeddingService');
-const databaseService = require('../services/databaseService');
+// --- Configuración ---
+const MIN_CHUNK_LENGTH_CHARS = 50;    // Mínimo caracteres para considerar un chunk
+const TARGET_CHUNK_WORDS = 200;      // Tamaño objetivo de chunk en palabras
+const MAX_CHUNK_WORDS = 300;         // Máximo absoluto antes de forzar división
+const MIN_KEYWORDS_FOR_VALIDATION = 4; // Mínimo palabras clave (largas) para validar chunk
+const EMBEDDING_BATCH_SIZE = 20;     // Lotes para generar embeddings
+const EMBEDDING_MODEL = "text-embedding-3-small";
+const USER_AGENT = 'Mozilla/5.0 (compatible; SynChatBot/1.1; +https://www.synchatai.com/bot)'; // User agent mejorado
 
-// --- Configuración de Chunking ---
-// Puedes experimentar con estos valores
-const MIN_CHUNK_LENGTH = 50;  // Mínimo de caracteres para guardar un chunk
-const MAX_CHUNK_LENGTH = 500; // Máximo aproximado antes de dividir (en caracteres)
-// const CHUNK_SIZE_WORDS = 200; // Alternativa: Tamaño en palabras
-// const CHUNK_OVERLAP_WORDS = 30; // Alternativa: Solapamiento en palabras
+// --- Inicialización de Clientes ---
+const supabaseUrl = process.env.SUPABASE_URL;
+const supabaseKey = process.env.SUPABASE_KEY;
+const openaiApiKey = process.env.OPENAI_API_KEY;
+
+if (!supabaseUrl || !supabaseKey || !openaiApiKey) {
+    console.error("Error: Faltan variables de entorno (SUPABASE_URL, SUPABASE_KEY, OPENAI_API_KEY).");
+    process.exit(1);
+}
+
+const supabase = createClient(supabaseUrl, supabaseKey);
+const openai = new OpenAI({ apiKey: openaiApiKey });
+
+console.log("Clientes Supabase y OpenAI inicializados para ingesta.");
+
+// --- Funciones de Ayuda ---
 
 /**
- * Divide texto basado en elementos estructurales y longitud máxima.
- * Intenta mantener párrafos/items juntos si caben.
- * @param {CheerioAPI} $ - El objeto Cheerio cargado con el área de contenido.
- * @param {Cheerio<Element>} elements - Los elementos a procesar (p, li, h1-h4).
- * @param {number} maxChunkLength - Longitud máxima del chunk en caracteres.
- * @returns {Array<string>} - Array de chunks de texto.
+ * Valida la calidad de un chunk de texto.
  */
-function chunkTextByStructure($, elements, maxChunkLength) {
+function validateChunk(text) {
+    if (!text || text.trim().length < MIN_CHUNK_LENGTH_CHARS) {
+        return false;
+    }
+    // Contar palabras significativas (más de 3 letras)
+    const significantWords = text.match(/\b[a-zA-ZáéíóúñÁÉÍÓÚÑ]{4,}\b/g) || [];
+    return significantWords.length >= MIN_KEYWORDS_FOR_VALIDATION;
+}
+
+/**
+ * Divide el contenido HTML en chunks jerárquicos.
+ */
+function chunkContent(html, url) {
+    console.log("Iniciando chunking jerárquico...");
+    const $ = load(html); // Llama directamente a la función 'load'
     const chunks = [];
-    let currentChunk = "";
+    let contextStack = []; // ["H1 Text", "H2 Text", ...]
+    let currentChunkLines = [];
+    let currentWordCount = 0;
 
-    elements.each((index, element) => {
-        // Usar $(element).text() en lugar de recargar con cheerio.load
-        let elementText = $(element).text().replace(/\s\s+/g, ' ').trim();
+    // 1. Limpieza Preliminar (más agresiva)
+    $('script, style, nav, footer, header, aside, form, noscript, iframe, svg, link[rel="stylesheet"], button, input, select, textarea, label, .sidebar, #sidebar, .comments, #comments, .related-posts, .share-buttons, .pagination, .breadcrumb, .modal, .popup, [aria-hidden="true"], [role="navigation"], [role="search"], .ad, .advertisement, #ad, #advertisement').remove();
+    console.log("Ruido HTML eliminado.");
 
-        if (elementText.length === 0) return; // Saltar elementos vacíos
+    // 2. Selección de Elementos Relevantes
+    const relevantSelectors = 'h1, h2, h3, h4, h5, h6, p, li, td, th, pre, blockquote';
+    // Podríamos añadir 'div' si sospechamos que hay contenido importante fuera de las etiquetas estándar,
+    // pero aumentaría el riesgo de ruido.
 
-        // Si añadir este elemento supera el límite, guardar el chunk actual (si es válido)
-        if (currentChunk.length > 0 && (currentChunk.length + elementText.length + 1) > maxChunkLength) {
-            if (currentChunk.length >= MIN_CHUNK_LENGTH) {
-                chunks.push(currentChunk);
+    $(relevantSelectors).each((i, el) => {
+        const $el = $(el);
+        const tag = $el.prop('tagName').toLowerCase();
+        // Limpiar texto: eliminar espacios múltiples, conservar saltos de línea intencionados (ej, <pre>)
+        let text = ($el.text() || '').replace(/\s\s+/g, ' ').trim();
+
+        if (text.length < 15) return; // Ignorar elementos muy cortos
+
+        // 3. Gestión de Contexto Jerárquico
+        let currentHierarchy = [...contextStack]; // Copia para este elemento
+        if (tag.match(/^h[1-6]$/)) {
+            const level = parseInt(tag[1]);
+            // Eliminar niveles inferiores o iguales al actual
+            contextStack = contextStack.slice(0, level - 1);
+            contextStack[level - 1] = text; // Establecer el encabezado actual
+            currentHierarchy = [...contextStack]; // Usar la jerarquía actualizada
+            // Los encabezados inician un nuevo chunk si hay algo acumulado
+            if (currentWordCount > 0) {
+                 const chunkText = currentChunkLines.join('\n');
+                 if (validateChunk(chunkText)) {
+                      chunks.push({
+                          text: chunkText,
+                          metadata: { url, hierarchy: [...contextStack.slice(0, level-1)] } // Jerarquía ANTERIOR al H
+                      });
+                 }
+                 currentChunkLines = [];
+                 currentWordCount = 0;
             }
-            currentChunk = elementText; // Empezar nuevo chunk con el elemento actual
-        } else {
-            // Añadir al chunk actual
-            currentChunk += (currentChunk.length > 0 ? "\n" : "") + elementText;
         }
 
-        // Manejar caso de elementos individuales muy largos
-        while (currentChunk.length > maxChunkLength) {
-             let splitPoint = currentChunk.lastIndexOf('.', maxChunkLength);
-             splitPoint = splitPoint > MIN_CHUNK_LENGTH ? splitPoint + 1 : maxChunkLength; // Punto o corte forzado
+        // 4. Construcción de Chunks
+        const elementWordCount = text.split(/\s+/).length;
 
-             const part = currentChunk.substring(0, splitPoint);
-             if (part.length >= MIN_CHUNK_LENGTH) { // Guardar solo si es suficientemente largo
-                chunks.push(part);
+        // Si añadir este elemento excede el MÁXIMO, guardar el chunk actual (si es válido)
+        if (currentWordCount > 0 && (currentWordCount + elementWordCount) > MAX_CHUNK_WORDS) {
+             const chunkText = currentChunkLines.join('\n');
+             if (validateChunk(chunkText)) {
+                 chunks.push({
+                     text: chunkText,
+                     metadata: { url, hierarchy: [...currentHierarchy] } // Jerarquía del último elemento añadido
+                 });
+            }
+            // Empezar nuevo chunk con el elemento actual
+            currentChunkLines = [text];
+            currentWordCount = elementWordCount;
+        } else {
+            // Añadir al chunk actual
+            currentChunkLines.push(text);
+            currentWordCount += elementWordCount;
+        }
+
+        // Si hemos alcanzado el tamaño OBJETIVO, guardar el chunk actual (si es válido)
+        if (currentWordCount >= TARGET_CHUNK_WORDS) {
+             const chunkText = currentChunkLines.join('\n');
+             if (validateChunk(chunkText)) {
+                 chunks.push({
+                     text: chunkText,
+                     metadata: { url, hierarchy: [...currentHierarchy] } // Jerarquía del último elemento
+                 });
              }
-             currentChunk = currentChunk.substring(splitPoint).trim();
+            currentChunkLines = [];
+            currentWordCount = 0;
         }
     });
 
-    // Añadir el último chunk si es válido
-    if (currentChunk.length >= MIN_CHUNK_LENGTH) {
-        chunks.push(currentChunk);
+    // Guardar el último chunk restante si es válido
+    if (currentWordCount > 0) {
+        const chunkText = currentChunkLines.join('\n');
+        if (validateChunk(chunkText)) {
+            chunks.push({
+                text: chunkText,
+                metadata: { url, hierarchy: [...contextStack] } // Última jerarquía conocida
+            });
+        }
     }
-    console.log(`(Chunker) Generados ${chunks.length} chunks finales.`);
+
+    console.log(`Chunking completado. Generados ${chunks.length} chunks válidos.`);
+    // console.log("Primer chunk:", chunks[0]); // Para depuración
     return chunks;
 }
 
+
 /**
- * Procesa una URL para un cliente: descarga, extrae, divide, embebe y guarda.
- * @param {string} clientId - El UUID del cliente.
- * @param {string} url - La URL a procesar.
+ * Genera embeddings para los chunks en lotes.
  */
-const ingestUrl = async (clientId, url) => {
-    console.log(`\n--- Iniciando ingesta MEJORADA para Cliente ${clientId} desde ${url} ---`);
+async function generateEmbeddings(chunks) {
+    console.log(`Generando embeddings para ${chunks.length} chunks (lotes de ${EMBEDDING_BATCH_SIZE})...`);
+    const embeddingsData = []; // [{ chunk: {}, embedding: [] }, ...]
+    let totalTokens = 0;
+
+    for (let i = 0; i < chunks.length; i += EMBEDDING_BATCH_SIZE) {
+        const batchChunks = chunks.slice(i, i + EMBEDDING_BATCH_SIZE);
+        const inputs = batchChunks.map(c => c.text.replace(/\n/g, ' ')); // Limpiar saltos de línea para embedding
+
+        try {
+            console.log(`Procesando lote ${Math.floor(i/EMBEDDING_BATCH_SIZE) + 1}/${Math.ceil(chunks.length/EMBEDDING_BATCH_SIZE)}...`);
+            const { data: embeddingResponseData, usage } = await openai.embeddings.create({
+                model: EMBEDDING_MODEL,
+                input: inputs
+            });
+
+            if (usage) totalTokens += usage.total_tokens;
+
+            if (!embeddingResponseData || embeddingResponseData.length !== batchChunks.length) {
+                 console.warn(`Respuesta de embedding inesperada para el lote ${i}. Se recibieron ${embeddingResponseData?.length || 0} embeddings.`);
+                 // Marcar estos chunks como fallidos o reintentar? Por ahora, los omitimos.
+                 continue; // Saltar este lote
+            }
+
+            batchChunks.forEach((chunk, idx) => {
+                if (embeddingResponseData[idx]?.embedding) {
+                    embeddingsData.push({
+                        ...chunk, // Incluye text y metadata
+                        embedding: embeddingResponseData[idx].embedding
+                    });
+                } else {
+                     console.warn(`No se pudo generar embedding para el chunk ${i+idx}. Texto: "${chunk.text.substring(0,50)}..."`);
+                }
+            });
+
+             // Pausa pequeña entre lotes para evitar rate limits estrictos
+             if (i + EMBEDDING_BATCH_SIZE < chunks.length) {
+                 await new Promise(resolve => setTimeout(resolve, 500)); // 0.5 segundos
+             }
+
+        } catch (error) {
+            console.error(`Error generando embeddings para el lote ${i}:`, error.message);
+            // Podríamos implementar reintentos aquí
+        }
+    }
+    console.log(`Embeddings generados para ${embeddingsData.length} chunks. Tokens totales usados: ${totalTokens}`);
+    return embeddingsData;
+}
+
+/**
+ * Almacena los chunks con embeddings en Supabase.
+ */
+async function storeChunks(clientId, chunksWithEmbeddings) {
+    if (!chunksWithEmbeddings || chunksWithEmbeddings.length === 0) {
+        console.log("No hay chunks válidos con embeddings para almacenar.");
+        return { data: null, error: null, count: 0 };
+    }
+
+    console.log(`Almacenando ${chunksWithEmbeddings.length} chunks en Supabase para cliente ${clientId}...`);
+
+    // Mapear al formato esperado por la tabla 'knowledge_base'
+    const recordsToInsert = chunksWithEmbeddings.map(c => ({
+        client_id: clientId,
+        content: c.text, // Texto original del chunk
+        embedding: c.embedding, // Vector
+        metadata: c.metadata, // Objeto { url, hierarchy }
+        // 'fts' (tsvector) debería generarse automáticamente en Supabase
+        // mediante un trigger o columna generada:
+        // Ejemplo SQL: ALTER TABLE knowledge_base ADD COLUMN fts tsvector
+        // GENERATED ALWAYS AS (to_tsvector('spanish', content)) STORED;
+    }));
+
+    try {
+        // Insertar en lotes si es necesario (Supabase tiene límites, pero insert suele manejar arrays grandes)
+        const { data, error, count } = await supabase
+            .from('knowledge_base') // Nombre de tu tabla RAG
+            .insert(recordsToInsert);
+
+        if (error) {
+            console.error("Error al almacenar chunks en Supabase:", error.message);
+            // Loguear detalles del error si es posible
+            if (error.details) console.error("Detalles:", error.details);
+             if (error.hint) console.error("Sugerencia:", error.hint);
+            return { data, error, count: count || 0 };
+        }
+
+        console.log(`Almacenamiento completado. ${count ?? recordsToInsert.length} chunks guardados/actualizados.`);
+        return { data, error, count: count ?? recordsToInsert.length };
+
+    } catch (error) {
+        console.error("Error inesperado durante el almacenamiento en Supabase:", error);
+        return { data: null, error, count: 0 };
+    }
+}
+
+// --- Ejecución Principal del Script ---
+async function main() {
+    const args = process.argv.slice(2);
+    if (args.length < 2) {
+        console.error("Uso: node src/scripts/ingestWebsite.js <clientId> <url>");
+        process.exit(1);
+    }
+    const clientId = args[0];
+    const urlToIngest = args[1];
+
+    if (!clientId || !urlToIngest || !urlToIngest.startsWith('http')) {
+        console.error("Por favor, proporciona un clientId válido y una URL completa (ej: https://...).");
+        process.exit(1);
+    }
+
+    console.log(`\n--- Iniciando Ingesta para Cliente ${clientId} desde ${urlToIngest} ---`);
+
     try {
         // 1. Descargar HTML
         console.log("Descargando HTML...");
-        const response = await axios.get(url, {
-             headers: { 'User-Agent': 'Mozilla/5.0 (compatible; SynChatBot/1.0; +https://www.tudominio-synchatai.com/bot)' } // User agent personalizado
+        const response = await axios.get(urlToIngest, {
+            headers: { 'User-Agent': USER_AGENT },
+            timeout: 15000 // Timeout de 15 segundos
         });
         const html = response.data;
-        console.log("HTML descargado.");
+        console.log(`HTML descargado (${(html.length / 1024).toFixed(1)} KB).`);
 
-        // 2. Cargar HTML y Eliminar Ruido
-        const $ = cheerio.load(html);
-        console.log("Eliminando ruido (scripts, styles, nav, footer, etc.)...");
-        $('script, style, nav, footer, header, aside, form, noscript, iframe, svg, link[rel="stylesheet"], #hubspot-messages-iframe-container, .cookie-consent-banner, #cookie-banner, .sidebar, #sidebar, .comments, #comments, .related-posts, .share-buttons').remove(); // Más selectores de ruido comunes
-
-        // 3. Identificar Área de Contenido Principal
-        let $contentArea = $('main').first();
-        if ($contentArea.length === 0) $contentArea = $('article').first();
-        if ($contentArea.length === 0) $contentArea = $('#content').first(); // Probar ID común
-        if ($contentArea.length === 0) $contentArea = $('.content').first(); // Probar clase común
-        if ($contentArea.length === 0) {
-            $contentArea = $('body');
-            console.warn("Advertencia: No se encontró <main>, <article>, #content o .content. Procesando <body> completo.");
-        } else {
-             console.log(`(Extractor) Usando <${$contentArea[0].tagName}${($contentArea.attr('id') ? `#${$contentArea.attr('id')}` : '')}${($contentArea.attr('class') ? `.${$contentArea.attr('class').split(' ')[0]}` : '')}> como área de contenido.`);
-        }
-
-        // 4. Seleccionar Elementos de Texto Relevantes
-        // Priorizar párrafos, listas, títulos. Excluir elementos vacíos o muy cortos implícitamente.
-        // Podríamos añadir 'div' pero sería muy ruidoso, mejor ser específicos.
-        // Excluir elementos dentro de nav/footer que pudieran haber quedado
-        const textElements = $contentArea.find('p, li, h1, h2, h3, h4, h5, h6, td, th, pre').filter((i, el) => {
-             // Filtrar elementos que están dentro de estructuras que probablemente no son contenido principal
-             // Esto es heurístico y puede necesitar ajustes
-             return $(el).parents('nav, footer, header, aside, form').length === 0 && $(el).text().trim().length > 10; // Mínimo 10 chars
-        });
-        console.log(`(Extractor) Se encontraron ${textElements.length} elementos de texto potenciales en el área de contenido.`);
-
-        // 5. Dividir en Chunks
-        console.log(`Dividiendo en chunks (máx ~${MAX_CHUNK_LENGTH} chars)...`);
-        const textChunks = chunkTextByStructure($, textElements, MAX_CHUNK_LENGTH);
-
-        if (textChunks.length === 0) {
-            console.error("Error: No se generaron chunks de texto válidos. Verifica la extracción o la estructura de la página.");
+        // 2. Extraer y Dividir Contenido
+        const chunks = chunkContent(html, urlToIngest);
+        if (chunks.length === 0) {
+            console.warn("No se generaron chunks válidos. Finalizando ingesta.");
             return;
         }
-        // Opcional: Loguear los chunks para depuración
-        // console.log("(Chunker) Chunks generados:", textChunks);
 
-        // 6. Generar Embeddings y Guardar
-        console.log("Generando embeddings y guardando en DB...");
-        let successCount = 0;
-        const batchSize = 5; // Procesar en pequeños lotes para no sobrecargar
-        for (let i = 0; i < textChunks.length; i += batchSize) {
-            const batch = textChunks.slice(i, i + batchSize);
-            console.log(`Procesando lote ${Math.floor(i/batchSize) + 1}/${Math.ceil(textChunks.length/batchSize)} (chunks ${i+1} a ${Math.min(i+batchSize, textChunks.length)})...`);
-
-            const embeddingPromises = batch.map(chunk => embeddingService.getEmbedding(chunk));
-            const embeddings = await Promise.all(embeddingPromises);
-
-            const savePromises = [];
-            for (let j = 0; j < batch.length; j++) {
-                if (embeddings[j]) { // Solo guardar si el embedding se generó
-                    savePromises.push(
-                        databaseService.saveKnowledgeChunk(clientId, batch[j], embeddings[j], url)
-                    );
-                    successCount++;
-                } else {
-                    console.warn(`No se pudo generar embedding para el chunk ${i + j + 1}. Saltando guardado.`);
-                }
-            }
-            // Esperar a que se guarden los chunks del lote actual
-            await Promise.all(savePromises);
-
-             // Pausa entre lotes para evitar rate limits
-             if (i + batchSize < textChunks.length) {
-                 console.log(`Pausa de 1 segundo entre lotes...`);
-                 await new Promise(resolve => setTimeout(resolve, 1000)); // 1 segundo
-             }
+        // 3. Generar Embeddings
+        const chunksWithEmbeddings = await generateEmbeddings(chunks);
+        if (chunksWithEmbeddings.length === 0) {
+            console.warn("No se pudieron generar embeddings. Finalizando ingesta.");
+            return;
         }
-        console.log(`--- Ingesta completada para ${url}. Guardados ${successCount}/${textChunks.length} chunks. ---`);
+
+        // 4. Almacenar en Supabase
+        await storeChunks(clientId, chunksWithEmbeddings);
+
+        console.log(`--- Ingesta Finalizada para ${urlToIngest} ---`);
 
     } catch (error) {
-         if (axios.isAxiosError(error)) { console.error(`Error de red/HTTP: ${error.message}`); }
-         else { console.error(`Error general durante la ingesta:`, error); }
+        if (axios.isAxiosError(error)) {
+            console.error(`Error de red/HTTP al descargar ${urlToIngest}: ${error.message}`);
+             if (error.response) {
+                 console.error(`Status: ${error.response.status}, Data: ${JSON.stringify(error.response.data).substring(0, 200)}...`);
+             }
+        } else {
+            console.error(`Error general durante la ingesta de ${urlToIngest}:`, error.message);
+             if (error.stack) { console.error(error.stack.substring(0, 500)); }
+        }
+        process.exitCode = 1; // Indicar que hubo un error
     }
-};
-
-// --- Ejecución del Script ---
-const args = process.argv.slice(2);
-if (args.length < 2) {
-    console.error("Uso: node src/scripts/ingestWebsite.js <clientId> <url>");
-    process.exit(1);
-}
-const clientId = args[0];
-const urlToIngest = args[1];
-if (!clientId || !urlToIngest || !urlToIngest.startsWith('http')) {
-     console.error("Por favor, proporciona un clientId válido y una URL completa (ej: https://...)");
-     process.exit(1);
 }
 
-// Validar que los servicios se cargaron bien (simplificado)
-if(typeof databaseService.saveKnowledgeChunk !== 'function' || typeof embeddingService.getEmbedding !== 'function'){
-    console.error("Error: Los servicios de base de datos o embedding no se cargaron correctamente.");
-    process.exit(1);
-}
-
-ingestUrl(clientId, urlToIngest);
-// -------------------------
+// Ejecutar la función principal
+main();
