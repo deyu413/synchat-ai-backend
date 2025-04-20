@@ -1,146 +1,71 @@
 // src/services/embeddingService.js
-import 'dotenv/config';
-import OpenAI from 'openai';
+const OpenAI = require('openai');
 
-// Inicializar cliente OpenAI
-if (!process.env.OPENAI_API_KEY) {
-    console.error("FATAL ERROR: OPENAI_API_KEY is missing in .env");
-    process.exit(1);
+let openai;
+if (process.env.OPENAI_API_KEY) {
+    openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
+} else {
+    console.error("¡Error Fatal! OPENAI_API_KEY no definida para Embedding Service.");
+    // El servicio no funcionará sin la key
 }
-const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
-console.log("LOG: OpenAI client initialized in embeddingService.");
 
+// Modelo de embedding recomendado
 const EMBEDDING_MODEL = "text-embedding-3-small";
-const EXPECTED_DIMENSION = 1536;
+// Dimensión esperada para este modelo (verificar en doc OpenAI)
+const EMBEDDING_DIMENSION = 1536;
 
 /**
- * Genera embedding para UN texto con reintentos.
- * @param {string} text - Texto a embedir.
- * @param {number} [retries=3] - Reintentos.
- * @returns {Promise<Array<number>|null>} Embedding o null.
+ * Obtiene el vector (embedding) para un texto dado.
+ * @param {string} text - El texto a convertir en vector.
+ * @returns {Promise<Array<number>|null>} - El vector o null si hay error.
  */
-export async function getEmbeddingWithRetry(text, retries = 3) {
-    if (!text || typeof text !== 'string') {
-        console.warn("WARN (Embedding): Invalid text provided:", text);
+const getEmbedding = async (text) => {
+    if (!openai) {
+        console.error("(Embedding Service) OpenAI client no inicializado.");
         return null;
     }
-    const inputText = text.replace(/\n/g, ' ').trim();
-    if (inputText.length === 0) {
-         console.warn("WARN (Embedding): Empty text after cleaning.");
+    if (!text || typeof text !== 'string' || text.trim().length === 0) {
+        console.warn("(Embedding Service) Texto inválido o vacío proporcionado para embedding.");
+        return null;
+    }
+
+
+    // Reemplazar saltos de línea y normalizar espacios (mejora calidad embedding)
+    const inputText = text.replace(/\n/g, ' ').replace(/\s+/g, ' ').trim();
+    // Evitar enviar texto vacío a la API
+     if (inputText.length === 0) {
          return null;
-    }
-
-    let delay = 1000;
-    console.log(`LOG (Embedding): Getting embedding for: "${inputText.substring(0, 50)}..."`);
-    for (let i = 0; i < retries; i++) {
-        try {
-            const response = await openai.embeddings.create({
-                model: EMBEDDING_MODEL,
-                input: inputText,
-                encoding_format: "float"
-            });
-            const embedding = response.data?.[0]?.embedding;
-            if (embedding) {
-                if(embedding.length !== EXPECTED_DIMENSION) {
-                     console.warn(`WARN (Embedding): Unexpected dimension (${embedding.length} vs ${EXPECTED_DIMENSION})`);
-                }
-                console.log("LOG (Embedding): Success.");
-                return embedding;
-            } else {
-                throw new Error("Invalid response structure from OpenAI Embeddings API");
-            }
-        } catch (error) {
-            const status = error?.status;
-            if (status === 429 && i < retries - 1) {
-                console.warn(`WARN (Embedding): Rate limit (429). Retrying in ${delay}ms...`);
-                await new Promise(resolve => setTimeout(resolve, delay));
-                delay *= 2;
-            } else {
-                console.error(`ERROR (Embedding) after ${i + 1} attempts:`, error.message || error);
-                return null; // Falló definitivamente
-            }
-        }
-    }
-    console.error(`ERROR (Embedding): Failed to get embedding after ${retries} retries.`);
-    return null;
-}
-
-/**
- * Genera embeddings para un LOTE de textos.
- * @param {Array<string>} texts - Array de textos.
- * @returns {Promise<Array<Array<number>|null>>} Array de embeddings (o null si falló).
- */
-export async function getEmbeddingsInBatch(texts) {
-    const BATCH_SIZE = 50;
-    console.log(`LOG (Embedding): Getting batch embeddings for ${texts?.length ?? 0} texts...`);
-     if (!texts || texts.length === 0) return [];
-
-     const allEmbeddings = [];
-
-     for (let i = 0; i < texts.length; i+= BATCH_SIZE) {
-        const batchTexts = texts.slice(i, i + BATCH_SIZE);
-        const cleanedBatchTexts = batchTexts.map(t => (t || '').replace(/\n/g, ' ').trim());
-        const validTextsIndices = cleanedBatchTexts.map((t, idx) => t.length > 0 ? idx : -1).filter(idx => idx !== -1);
-        const validTextsToSend = cleanedBatchTexts.filter(t => t.length > 0);
-
-        if (validTextsToSend.length === 0) {
-            console.log(`LOG (Embedding): Batch ${Math.floor(i/BATCH_SIZE)+1} has only empty texts, skipping.`);
-             allEmbeddings.push(...Array(batchTexts.length).fill(null));
-             continue;
-        }
-
-        console.log(`LOG (Embedding): Processing batch ${Math.floor(i/BATCH_SIZE)+1} (${validTextsToSend.length} valid texts)`);
-        let attempt = 0;
-        const MAX_RETRIES = 3;
-        let delay = 1000;
-        let batchResult = null;
-
-        while (attempt < MAX_RETRIES && !batchResult) {
-            try {
-                const response = await openai.embeddings.create({
-                    model: EMBEDDING_MODEL,
-                    input: validTextsToSend,
-                    encoding_format: "float"
-                });
-
-                if (response.data && response.data.length === validTextsToSend.length) {
-                     batchResult = response.data.map(item => item.embedding);
-                    console.log(`LOG (Embedding): Batch ${Math.floor(i/BATCH_SIZE)+1} successful on attempt ${attempt + 1}.`);
-                } else {
-                    console.error(`ERROR (Embedding): Mismatch in OpenAI batch response for batch ${Math.floor(i/BATCH_SIZE)+1}.`);
-                    break;
-                }
-            } catch(error) {
-                const status = error?.status;
-                 if (status === 429 && attempt < MAX_RETRIES - 1) {
-                    console.warn(`WARN (Embedding): Rate limit (429) on batch ${Math.floor(i/BATCH_SIZE)+1}. Retrying in ${delay}ms...`);
-                    await new Promise(resolve => setTimeout(resolve, delay));
-                    delay *= 2;
-                } else {
-                    console.error(`ERROR FATAL (Embedding) processing batch ${Math.floor(i/BATCH_SIZE)+1} after ${attempt + 1} attempts:`, error.message);
-                    break;
-                }
-            }
-            attempt++;
-        }
-
-         const finalBatchEmbeddings = Array(batchTexts.length).fill(null);
-         if (batchResult) {
-             let resultIndex = 0;
-             validTextsIndices.forEach(originalIndex => {
-                 if (batchResult[resultIndex]) {
-                      finalBatchEmbeddings[originalIndex] = batchResult[resultIndex];
-                 }
-                 resultIndex++;
-             });
-         }
-         allEmbeddings.push(...finalBatchEmbeddings);
-
-        if (i + BATCH_SIZE < texts.length) {
-           await new Promise(resolve => setTimeout(resolve, 200));
-        }
      }
 
-     console.log(`LOG (Embedding): Finished batch embeddings. Got ${allEmbeddings.filter(e => e !== null).length} successful embeddings out of ${texts.length}.`);
-     return allEmbeddings;
-}
+    console.log(`(Embedding Service) Obteniendo embedding para texto: "${inputText.substring(0, 50)}..."`);
+
+    try {
+        const response = await openai.embeddings.create({
+            model: EMBEDDING_MODEL,
+            input: inputText,
+            // dimensions: EMBEDDING_DIMENSION // Descomentar si el modelo lo soporta y quieres forzar dimensión
+        });
+
+        const embedding = response?.data?.[0]?.embedding;
+
+        if (embedding) {
+             // Validación opcional de dimensión
+             if(embedding.length !== EMBEDDING_DIMENSION){
+                  console.warn(`(Embedding Service) Warning: La dimensión del embedding (${embedding.length}) no coincide con la esperada (${EMBEDDING_DIMENSION})`);
+             }
+             console.log("(Embedding Service) Embedding obtenido con éxito.");
+            return embedding;
+        } else {
+            console.error("(Embedding Service) Respuesta inesperada de la API de Embeddings:", response);
+            return null;
+        }
+    } catch (error) {
+        console.error(`(Embedding Service) Error al obtener embedding:`, error.message || error);
+        return null;
+    }
+};
+
+module.exports = {
+    getEmbedding,
+    EMBEDDING_DIMENSION
+};

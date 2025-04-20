@@ -1,181 +1,140 @@
 // src/controllers/chatController.js
-import 'dotenv/config';
-// Importar clientes y servicios necesarios
-import openai from '../config/openaiClient.js';
-import { getEmbeddingWithRetry } from '../services/embeddingService.js';
-import { hybridSearch, getCache, setCache, getConversationHistory, saveMessage, getOrCreateConversation } from '../services/databaseService.js'; // Importar todo lo necesario
-
-const MODEL_NAME = "gpt-3.5-turbo"; // ¡Modelo Corregido!
-const MAX_HISTORY_MESSAGES = 8;
+const openaiService = require('../services/openaiService');
+const databaseService = require('../services/databaseService');
+const embeddingService = require('../services/embeddingService');
 
 /**
- * Función interna para generar la respuesta RAG.
+ * Maneja la recepción de un nuevo mensaje de chat.
+ * Orquesta la búsqueda de historial, RAG, llamada a OpenAI y guardado.
  */
-async function generateRAGResponse(clientId, question, history = []) {
-    console.log(`LOG (Controller): Generando respuesta RAG para ${clientId}. Pregunta: "${question.substring(0,50)}..."`);
+const handleChatMessage = async (req, res, next) => { // Añadido next para manejo de errores
+    const { message, conversationId, clientId } = req.body;
 
-    // 1. Generar Embedding para la Pregunta
-    const queryEmbedding = await getEmbeddingWithRetry(question);
-
-    // 2. Buscar Contexto Relevante (RAG Híbrido)
-    let contextChunks = [];
-    if (queryEmbedding) {
-        contextChunks = await hybridSearch(clientId, question, queryEmbedding);
-        console.log(`LOG (Controller): hybridSearch devolvió ${contextChunks.length} chunks.`);
-    } else {
-         console.warn("WARN (Controller): No se pudo generar embedding. Sin búsqueda RAG.");
+    // Validación de entrada básica
+    if (!message || !conversationId || !clientId) {
+        console.warn('Petición inválida a /message. Faltan datos:', req.body);
+        // Usar return aquí evita seguir ejecutando código en esta función
+        return res.status(400).json({ error: 'Faltan datos requeridos (message, conversationId, clientId).' });
     }
 
-    // 3. Construir Mensajes para OpenAI
-    const messages = [];
-    let systemContent = `Eres Zoe, asistente experto de SynChat AI para el cliente ${clientId}. Eres amable, profesional y respondes de forma concisa.`;
+    console.log(`Msg recibido C:${clientId}, CV:${conversationId}: "${message}"`);
 
-    // --- Construcción del Contexto para el Prompt ---
-    if (contextChunks && contextChunks.length > 0) {
-        const contextString = contextChunks.map(c => {
-             // Intentar obtener jerarquía o sección, con fallback
-             const hierarchy = c.metadata?.hierarchy?.join(' > ') || c.metadata?.section || 'Contexto';
-             const url = c.metadata?.url || '';
-             // Limpiar el contenido antes de añadirlo
-             const cleanContent = (c.content || '').replace(/\[CONTEXTO:.*?\]/g, '').trim(); // Eliminar prefijos si existen
-             return `--- Inicio Fragmento [Fuente: ${hierarchy}${url ? ` (${url})` : ''}] ---\n${cleanContent}\n--- Fin Fragmento ---`;
-        }).join('\n\n'); // Separar fragmentos con doble salto de línea
-
-        systemContent += `\n\nCRÍTICO: Basa tu respuesta PRIORITARIAMENTE en la siguiente información recuperada. Si la información responde a la pregunta del usuario, úsala EXCLUSIVAMENTE. Si no responde directamente, indícalo.\n=== CONTEXTO RECUPERADO ===\n${contextString}\n=== FIN CONTEXTO ===`;
-    } else {
-        systemContent += "\nNo se encontró información específica relevante en la base de conocimiento para esta pregunta.";
-    }
-    // --- Fin Construcción del Contexto ---
-
-     systemContent += `\n\nInstrucciones Adicionales:\n - Cita tus fuentes: Si usas información del contexto, DEBES añadir la [Fuente: ...] correspondiente EXACTAMENTE como aparece en el contexto, al final de la frase o párrafo relevante.\n - Si la información del contexto no responde directamente a la pregunta del usuario, indícalo claramente y no intentes responderla usando solo conocimiento general. Di algo como "No encontré información específica sobre eso en la base de datos.".\n - Sé conciso: Limita tu respuesta a 2-3 párrafos como máximo.\n - Usa formato Markdown si mejora la legibilidad (listas, negritas) si aplica.`;
-
-    messages.push({ role: "system", content: systemContent });
-
-    // Añadir historial (si existe)
-    if (history && history.length > 0) {
-        messages.push(...history);
-    }
-    // Añadir pregunta actual
-    messages.push({ role: "user", content: question });
-
-    console.log(`LOG (Controller): Enviando ${messages.length} mensajes a OpenAI (${MODEL_NAME}).`);
-
-    // 4. Llamar a OpenAI
-    let reply = "Lo siento, no pude procesar tu solicitud en este momento."; // Mensaje por defecto
     try {
-        const response = await openai.chat.completions.create({
-            model: MODEL_NAME,
-            messages: messages,
-            temperature: 0.2,
-            max_tokens: 350
-        });
-        const generatedReply = response.choices[0]?.message?.content?.trim();
-        if (generatedReply) {
-             reply = generatedReply;
-             console.log(`LOG (Controller): Respuesta recibida de ${MODEL_NAME}.`);
+        // --- Obtener datos necesarios en paralelo ---
+        const historyLimit = 8; // Número de mensajes previos a considerar
+        const [conversationHistory, clientConfig, questionEmbedding] = await Promise.all([
+             databaseService.getConversationHistory(conversationId, historyLimit),
+             databaseService.getClientConfig(clientId),
+             embeddingService.getEmbedding(message)
+        ]);
+
+        console.log(`(Controller) Historial recuperado: ${conversationHistory.length} mensajes.`);
+        console.log(`(Controller) Config cliente recuperada: ${clientConfig ? 'OK' : 'No encontrada'}`);
+
+        if (!clientConfig) {
+            console.error(`Cliente no encontrado o sin configuración: ${clientId}`);
+            // Podrías decidir si fallar o continuar con un prompt genérico
+            // return res.status(404).json({ error: 'Cliente no configurado o no encontrado.'});
+        }
+        // Usar prompt base del cliente o uno por defecto si no existe
+        const systemPrompt = clientConfig?.base_prompt || `Eres Zoe, un asistente virtual amable y servicial. Responde de forma concisa.`;
+
+        // --- Lógica RAG ---
+        let relevantKnowledge = [];
+        if (questionEmbedding) {
+            const knowledgeLimit = 3; // Máximo de fragmentos RAG a usar
+            // El umbral se define por defecto en databaseService (actualmente 0.65)
+            relevantKnowledge = await databaseService.findRelevantKnowledge(
+                 clientId,
+                 questionEmbedding,
+                 knowledgeLimit
+            );
+        }
+        // Formatear contexto RAG para el prompt
+        const ragContext = relevantKnowledge.join("\n\n---\n\n");
+
+        // --- Construir Prompt para OpenAI ---
+        const messagesForAPI = [
+            // Instrucción de Sistema + Contexto RAG (si existe)
+            {
+                role: "system",
+                content: systemPrompt + (ragContext ? `\n\nUtiliza estrictamente la siguiente información específica si es relevante para responder la pregunta del usuario:\n${ragContext}` : '')
+            },
+            // Historial de la conversación (si existe)
+            ...conversationHistory,
+            // Mensaje actual del usuario
+            { role: "user", content: message }
+        ];
+        console.log(`(Controller) Enviando ${messagesForAPI.length} mensajes a OpenAI.`);
+        // Descomentar para depuración detallada del prompt:
+        // console.log('(Controller) Prompt Completo:', JSON.stringify(messagesForAPI, null, 2));
+
+        // --- Llamar a OpenAI ---
+        const botReplyText = await openaiService.getChatCompletion(messagesForAPI);
+
+        // --- Procesar Respuesta y Guardar ---
+        if (botReplyText !== null && botReplyText !== '') {
+             // Guardar mensajes en DB (no bloqueamos la respuesta al usuario por esto)
+             // Usamos .catch aquí para loggear errores de guardado sin detener todo
+            Promise.all([
+                 databaseService.saveMessage(conversationId, 'user', message),
+                 databaseService.saveMessage(conversationId, 'bot', botReplyText)
+            ]).catch(saveError => {
+                 console.error(`Error no crítico al guardar mensajes para ${conversationId}:`, saveError);
+            });
+
+             // Enviar respuesta de Zoe al widget
+             res.status(200).json({ reply: botReplyText });
+
         } else {
-             console.error("ERROR (Controller): Respuesta inesperada de OpenAI (contenido vacío o estructura incorrecta):", response);
-             // Mantener el mensaje de error por defecto
+             // Si OpenAI no dio respuesta válida
+             console.error(`Respuesta vacía o nula de OpenAI para conversación ${conversationId}`);
+            res.status(500).json({ error: 'La IA no pudo generar una respuesta en este momento.' });
         }
-    } catch(error) {
-        console.error(`ERROR FATAL (Controller) al llamar a OpenAI ${MODEL_NAME}:`, error);
-        // Mantener el mensaje de error por defecto o uno más específico si es posible
-        reply = "Lo siento, ocurrió un error al contactar con el servicio de IA.";
-    }
-
-    return reply;
-}
-
-// --- Manejadores para las Rutas API ---
-
-/**
- * Manejador para POST /api/chat/start
- */
-// Definir la función SIN export aquí
-async function startConversationFn(req, res) {
-    const { clientId } = req.body;
-    console.log(`LOG (Controller): Recibida petición /start para cliente ${clientId}`);
-    if (!clientId) {
-        return res.status(400).json({ error: "Falta clientId" });
-    }
-    try {
-        const conversationId = await getOrCreateConversation(clientId); // Crea una nueva siempre para /start
-        if (!conversationId) {
-             throw new Error("No se pudo crear la conversación en DB.");
-        }
-        console.log(`LOG (Controller): Nueva conversación iniciada: ${conversationId}`);
-        res.status(201).json({ conversationId }); // Devolver el nuevo ID
 
     } catch (error) {
-        console.error('Error en startConversation:', error);
-        res.status(500).json({ error: 'Error interno al iniciar conversación' });
+        // Capturar cualquier error inesperado en el proceso
+        console.error(`Error general capturado en handleChatMessage para ${conversationId}:`, error);
+        // Pasar el error al siguiente middleware de manejo de errores (definido en server.js)
+        next(error);
     }
 };
 
 /**
- * Manejador para POST /api/chat/message
+ * Inicia una nueva conversación o recupera una existente si se pasa ID (aunque la ruta /start no lo usa).
  */
- // Definir la función SIN export aquí
-async function handleChatMessageFn(req, res) {
+const startConversation = async (req, res, next) => { // Añadido next
+    // --- Log para diagnóstico ---
+    console.log('>>> chatController.js: DENTRO de startConversation'); // LOG AÑADIDO
+
     try {
-        const { clientId, conversationId, message } = req.body;
-        console.log(`LOG (Controller): Recibida petición /message para CV ${conversationId}`);
-
-        if (!clientId || !message || !conversationId) {
-            return res.status(400).json({ error: "Faltan clientId, conversationId o message" });
+        const { clientId } = req.body;
+        if (!clientId) {
+            console.warn('Petición inválida a /start. Falta clientId.');
+            return res.status(400).json({ error: 'Falta clientId.' });
         }
 
-        // Verificar caché de respuesta final
-        const cacheKey = `response:${clientId}:${conversationId}:${message}`;
-        const cachedReply = getCache(cacheKey);
-        if (cachedReply) {
-            console.log("LOG (Controller): Devolviendo respuesta desde caché.");
-            return res.json({ reply: cachedReply, conversationId });
+        // Verificar si el cliente existe antes de crear conversación (opcional pero buena idea)
+        const clientExists = await databaseService.getClientConfig(clientId);
+        if (!clientExists) {
+            console.warn(`Intento de iniciar conversación para cliente inexistente: ${clientId}`);
+            return res.status(404).json({ error: 'Cliente inválido o no encontrado.' });
         }
 
-        // Obtener historial REAL
-        const history = await getConversationHistory(conversationId, MAX_HISTORY_MESSAGES);
-
-        // Generar la respuesta
-        const reply = await generateRAGResponse(clientId, message, history);
-
-        // Guardar mensajes
-        let saved = false;
-        if (reply && !reply.startsWith("Lo siento")) {
-             // Guardar en paralelo puede ser ligeramente más rápido
-             const savePromises = [
-                 saveMessage(conversationId, 'user', message),
-                 saveMessage(conversationId, 'bot', reply)
-             ];
-             const results = await Promise.all(savePromises);
-             saved = results.every(Boolean); // True si ambos guardados fueron exitosos
-             if (!saved) {
-                 console.warn(`WARN (Controller): Fallo al guardar uno o ambos mensajes para CV ${conversationId}`);
-             } else {
-                  console.log(`LOG (Controller): Mensajes guardados para CV ${conversationId}`);
-             }
-        } else {
-            console.warn(`WARN (Controller): No se guardarán mensajes para CV ${conversationId} (respuesta vacía o de error).`);
-        }
-
-        // Actualizar caché
-        if (reply && !reply.startsWith("Lo siento")) {
-             setCache(cacheKey, reply);
-        }
-
-        res.json({
-            reply: reply,
-            conversationId: conversationId
-        });
+        // Siempre creamos una nueva conversación al llamar a /start
+        const conversationId = await databaseService.getOrCreateConversation(clientId, null);
+        console.log(`(Controller) Conversación iniciada: ${conversationId} para cliente ${clientId}`);
+        // 201 Created es más apropiado aquí que 200 OK
+        res.status(201).json({ conversationId });
 
     } catch (error) {
-        console.error('Error en handleChatMessage:', error);
-        res.status(500).json({ error: 'Error interno del servidor' });
+        console.error(`Error en startConversation para cliente ${req.body?.clientId}:`, error);
+        next(error); // Pasar al middleware de errores
     }
 };
 
-// --- Exportación Nombrada ÚNICA al final del archivo ---
-export {
-    startConversationFn as startConversation, // Exportar con el nombre esperado por api.js
-    handleChatMessageFn as handleChatMessage  // Exportar con el nombre esperado por api.js
+module.exports = {
+    handleChatMessage,
+    startConversation,
+    // Aquí podríamos añadir getHistory si lo implementamos
 };

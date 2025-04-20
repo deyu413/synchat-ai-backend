@@ -1,204 +1,272 @@
 // src/services/databaseService.js
-import 'dotenv/config';
-import { createClient } from '@supabase/supabase-js';
-import { v4 as uuidv4 } from 'uuid'; // Necesario para getOrCreateConversation
 
-// Inicializar cliente Supabase
-if (!process.env.SUPABASE_URL) throw new Error('SUPABASE_URL falta en .env');
-if (!process.env.SUPABASE_KEY) throw new Error('SUPABASE_KEY (Service Role) falta en .env');
-const supabase = createClient(process.env.SUPABASE_URL, process.env.SUPABASE_KEY);
-console.log("LOG (DB): Supabase client initialized in databaseService.");
+const { Pool } = require('pg');
+const { v4: uuidv4 } = require('uuid');
 
-// Nombres de tablas (centralizar)
-const KNOWLEDGE_TABLE = 'knowledge_base';
-const MESSAGES_TABLE = 'Messages';
-const CONVERSATIONS_TABLE = 'Conversations';
-const CLIENTS_TABLE = 'Clients'; // Asume que tu tabla de clientes se llama así
-
-// Constantes
-const MIN_CHUNK_WORDS_FOR_STORAGE = 30;
-const SIMILARITY_THRESHOLD = 0.55; // <-- ¡Umbral Corregido y Razonable! ¡AJUSTAR CON PRUEBAS!
-const MATCH_COUNT = 5;
-const CACHE_TTL_MS = 5 * 60 * 1000;
-
-// --- Caché en Memoria Simple ---
-const questionCache = new Map();
-
-export function getCache(key) {
-    const entry = questionCache.get(key);
-    if (entry && Date.now() < entry.expiry) {
-        console.log(`LOG (Cache): Cache HIT para key: ${key.substring(0,50)}...`);
-        return entry.value;
-    }
-     if (entry) { questionCache.delete(key); }
-    return null;
+// Verificación inicial de la variable de entorno de la base de datos
+if (!process.env.DATABASE_URL) {
+    console.error("¡Error Fatal! La variable de entorno DATABASE_URL no está definida.");
+    console.error("Asegúrate de tener un archivo .env en la raíz con DATABASE_URL='postgresql://...' o configúrala en tu entorno de despliegue.");
+    process.exit(1); // Salir si no hay URL de DB
+}
+// Verificación opcional de la clave OpenAI (aunque no se usa directamente aquí, puede ser útil)
+if (!process.env.OPENAI_API_KEY) {
+    console.warn("Advertencia: OPENAI_API_KEY no está definida. Esto puede ser necesario en otros servicios.");
 }
 
-export function setCache(key, value) {
-    console.log(`LOG (Cache): Setting cache para key: ${key.substring(0,50)}...`);
-    const expiry = Date.now() + CACHE_TTL_MS;
-    questionCache.set(key, { value, expiry });
-    if (questionCache.size > 500) { /* ... pruning ... */ }
-}
+// Crear el pool de conexiones a PostgreSQL
+const pool = new Pool({
+    connectionString: process.env.DATABASE_URL,
+    // Configuración SSL puede ser necesaria dependiendo del proveedor (ej: Heroku, Render)
+    // ssl: { rejectUnauthorized: false } // Descomentar si es necesario
+});
 
-// --- Búsqueda Híbrida ---
+// Manejador de errores para el pool
+pool.on('error', (err, client) => {
+    console.error('(DB Service) Error inesperado en el cliente inactivo del pool', err);
+    process.exit(-1); // Salir en caso de error grave del pool
+});
+
+console.log("(DB Service) Pool de conexiones PostgreSQL inicializado.");
+
+// --- Obtener Configuración del Cliente ---
 /**
- * Realiza búsqueda híbrida. Recibe embedding pre-calculado.
+ * Obtiene la configuración base de un cliente desde la tabla Clients.
+ * @param {string} clientId - El UUID del cliente.
+ * @returns {Promise<object|null>} - El objeto de configuración del cliente o null si no se encuentra.
  */
-export async function hybridSearch(clientId, query, queryEmbedding) {
-    // (Pega aquí la LÓGICA COMPLETA de hybridSearch CORREGIDA de mi respuesta anterior)
-    // Asegúrate de que usa SIMILARITY_THRESHOLD = 0.55 y llama a la función SQL 'vector_search'
-    // --- INICIO CÓDIGO PEGADO hybridSearch ---
-    const cacheKey = `hybridSearch:${clientId}:${query}`; const cachedResult = getCache(cacheKey); if (cachedResult) return cachedResult;
-    console.log(`LOG (Search): Iniciando búsqueda híbrida para cliente ${clientId}. Query: "${query.substring(0,50)}..."`);
-    if (!queryEmbedding) { console.warn("WARN (Search): queryEmbedding nulo. Realizando solo búsqueda FTS."); }
-    let vectorResults = []; let fullTextResults = []; let combinedResults = [];
+const getClientConfig = async (clientId) => {
+    console.log(`(DB Service) Buscando config para cliente: ${clientId}`);
+    const query = 'SELECT client_id, client_name, base_prompt, knowledge_config FROM Clients WHERE client_id = $1';
     try {
-        if (queryEmbedding) {
-            console.log(`LOG (Search): Ejecutando RPC vector_search umbral >= ${SIMILARITY_THRESHOLD}...`);
-            const { data: rpcData, error: rpcError } = await supabase.rpc('vector_search', { client_id_input: clientId, query_embedding: queryEmbedding, similarity_threshold: SIMILARITY_THRESHOLD, match_count: MATCH_COUNT });
-            if (rpcError) { console.error("ERROR (Search): RPC vector_search:", rpcError); }
-            else { vectorResults = rpcData || []; vectorResults.forEach(r => r.score = r.similarity); console.log(`LOG (Search): Vectorial encontró ${vectorResults.length}.`); }
+        const result = await pool.query(query, [clientId]);
+        if (result.rows.length > 0) {
+            console.log(`(DB Service) Configuración encontrada para cliente ${clientId}.`);
+            return result.rows[0];
         }
-        console.log("LOG (Search): Ejecutando búsqueda FTS...");
-        const ftsQuery = query.split(/\s+/).filter(Boolean).join(' | ');
-        if (ftsQuery) {
-            const { data: ftsData, error: ftsError } = await supabase.from(KNOWLEDGE_TABLE).select('id, content, metadata, ts_rank(to_tsvector(\'spanish\', content), websearch_to_tsquery(\'spanish\', $1)) as score_fts').eq('client_id', clientId).textSearch('content', ftsQuery, { type: 'websearch', config: 'spanish' }).order('score_fts', { ascending: false }).limit(MATCH_COUNT);
-            if (ftsError) { console.error("ERROR (Search): FTS:", ftsError); }
-            else { fullTextResults = ftsData || []; fullTextResults.forEach(r => r.score = r.score_fts > 0 ? 0.1 + (r.score_fts * 0.4) : 0.1); console.log(`LOG (Search): FTS encontró ${fullTextResults.length}.`); }
-        } else { console.log("LOG (Search): FTS omitida."); }
-        console.log("LOG (Search): Combinando resultados...");
-        const combined = new Map();
-        vectorResults.forEach(r => { if (r?.id) combined.set(r.id, r); });
-        fullTextResults.forEach(r => { if (r?.id && !combined.has(r.id)) combined.set(r.id, r); });
-        combinedResults = Array.from(combined.values());
-        combinedResults.sort((a, b) => (b.score ?? 0) - (a.score ?? 0)); // TODO: Mejorar combinación
-        const finalResults = combinedResults.slice(0, MATCH_COUNT);
-        console.log(`LOG (Search): Devolviendo ${finalResults.length} resultados combinados.`);
-        setCache(cacheKey, finalResults); return finalResults;
-    } catch (error) { console.error(`ERROR FATAL durante hybridSearch:`, error); return []; }
-    // --- FIN CÓDIGO PEGADO hybridSearch ---
-}
-
-// ----- Funciones de Almacenamiento (Ingesta) -----
-export async function storeChunks(clientId, chunksWithEmbeddings) {
-    // (Pega aquí la función storeChunks COMPLETA y robusta que te di antes)
-     // --- INICIO CÓDIGO PEGADO storeChunks ---
-     console.log(`LOG (DB): Iniciando storeChunks para ${clientId}. Recibidos ${chunksWithEmbeddings?.length ?? 0} chunks.`);
-     if (!chunksWithEmbeddings || chunksWithEmbeddings.length === 0) { console.warn("WARN (DB): No hay chunks con embeddings para guardar."); return { insertedCount: 0, errors: ["No chunks received"] }; }
-     const validChunksData = chunksWithEmbeddings.filter(c => c.text && c.text.split(/\s+/).length >= MIN_CHUNK_WORDS_FOR_STORAGE && c.embedding && c.embedding.length === 1536 && c.metadata?.url).map(c => ({ client_id: clientId, content: c.text, embedding: c.embedding, metadata: c.metadata }));
-     const discardedCount = chunksWithEmbeddings.length - validChunksData.length;
-     if (discardedCount > 0) { console.warn(`WARN (DB): Se descartaron ${discardedCount} chunks por datos inválidos/cortos.`); }
-     if (validChunksData.length === 0) { console.error("ERROR (DB): No quedaron chunks válidos para insertar."); return { insertedCount: 0, errors: ["No valid chunks to insert"] }; }
-     console.log(`LOG (DB): Preparados ${validChunksData.length} registros válidos para insertar.`);
-     const INSERT_BATCH_SIZE = 100; let successfulInserts = 0; const errors = [];
-     for(let i = 0; i < validChunksData.length; i += INSERT_BATCH_SIZE) {
-         const batchToInsert = validChunksData.slice(i, i + INSERT_BATCH_SIZE);
-         console.log(`LOG (DB): Intentando insertar lote ${Math.floor(i/INSERT_BATCH_SIZE) + 1}/${Math.ceil(validChunksData.length/INSERT_BATCH_SIZE)} (${batchToInsert.length} registros)...`);
-         try {
-             const { error, count } = await supabase.from(KNOWLEDGE_TABLE).insert(batchToInsert, { count: 'exact' });
-             if (error) { console.error(`ERROR (DB) insertando lote ${Math.floor(i/INSERT_BATCH_SIZE) + 1}:`, error); errors.push(`Batch ${Math.floor(i/INSERT_BATCH_SIZE) + 1}: ${error.message}`); }
-             else { console.log(`LOG (DB): Lote ${Math.floor(i/INSERT_BATCH_SIZE) + 1} guardado exitosamente (Count: ${count}).`); successfulInserts += count || batchToInsert.length; }
-         } catch (batchError) { console.error(`ERROR FATAL (DB) insertando lote ${Math.floor(i/INSERT_BATCH_SIZE) + 1}:`, batchError); errors.push(`Batch ${Math.floor(i/INSERT_BATCH_SIZE) + 1} (Fatal): ${batchError.message}`); }
-     }
-     console.log(`--- RESULTADO storeChunks: Insertados ${successfulInserts}/${validChunksData.length} registros válidos. Errores: ${errors.length}. ---`);
-     return { insertedCount: successfulInserts, errors: errors };
-     // --- FIN CÓDIGO PEGADO storeChunks ---
-}
-
-// ----- Funciones de Historial (¡IMPLEMENTADAS!) -----
-/**
- * Obtiene los últimos N mensajes de una conversación.
- */
-export async function getConversationHistory(conversationId, limit = 10) {
-   console.log(`LOG (DB): Buscando historial para CV: ${conversationId}, límite ${limit}`);
-   if (!conversationId) return [];
-   try {
-       const { data, error } = await supabase
-          .from(MESSAGES_TABLE) // Usa constante
-          .select('sender, content')
-          .eq('conversation_id', conversationId)
-          .order('timestamp', { ascending: false })
-          .limit(limit);
-       if (error) throw error; // Lanza error para capturar abajo
-
-       const history = (data || []).reverse().map(row => ({
-           role: row.sender === 'bot' ? 'assistant' : 'user',
-           content: row.content
-       }));
-        console.log(`LOG (DB): Historial encontrado para ${conversationId}: ${history.length} mensajes.`);
-        return history;
-   } catch (error) {
-       console.error(`ERROR (DB) al obtener historial de ${conversationId}:`, error);
-       return []; // Devolver vacío en caso de error
-   }
-}
-
-/**
- * Guarda un mensaje en la base de datos.
- */
-export async function saveMessage(conversationId, sender, textContent) {
-    console.log(`LOG (DB): Guardando mensaje para ${conversationId} (${sender})`);
-    if (!conversationId || !sender || !textContent) { /* ... error ... */ return false; }
-    try {
-        // TODO: Considerar transacción si actualizas Conversations.last_message_at
-        const { error } = await supabase
-            .from(MESSAGES_TABLE) // Usa constante
-            .insert([{ conversation_id: conversationId, sender, content: textContent }]);
-        if (error) throw error; // Lanza error
-        console.log(`LOG (DB): Mensaje guardado OK para ${conversationId}.`);
-        return true;
+        console.warn(`(DB Service) No se encontró configuración para el cliente ${clientId}.`);
+        return null;
     } catch (error) {
-         console.error(`ERROR (DB) al guardar mensaje para ${conversationId}:`, error);
-         return false;
+        console.error(`(DB Service) Error al obtener config del cliente ${clientId}:`, error);
+        throw error; // Re-lanzar para que el controlador maneje el error
     }
-}
+};
 
+// --- Obtener Historial de Conversación ---
 /**
- * Obtiene o crea una conversación.
- * @param {string} clientId
- * @param {string|null} [conversationId=null]
- * @returns {Promise<string|null>} El ID de la conversación o null si hay error.
+ * Obtiene los últimos mensajes de una conversación, formateados para la API de OpenAI.
+ * @param {string} conversationId - El UUID de la conversación.
+ * @param {number} [messageLimit=10] - Número máximo de mensajes a recuperar.
+ * @returns {Promise<Array<object>>} - Un array de objetos { role: 'user'|'assistant', content: '...' }.
  */
-export async function getOrCreateConversation(clientId, conversationId = null) {
-    console.log(`LOG (DB): Obteniendo/Creando conversación para cliente ${clientId}, ID previo: ${conversationId}`);
-     try {
+const getConversationHistory = async (conversationId, messageLimit = 10) => {
+    console.log(`(DB Service) Buscando historial para conversación: ${conversationId}, límite: ${messageLimit}`);
+    // Seleccionamos ordenando por timestamp DESC para obtener los últimos, luego invertimos para orden cronológico
+    const query = `
+        SELECT sender, content 
+        FROM Messages 
+        WHERE conversation_id = $1 
+        ORDER BY timestamp DESC 
+        LIMIT $2
+    `;
+    try {
+        const result = await pool.query(query, [conversationId, messageLimit]);
+        // Invertir el array para tener el orden cronológico correcto (más antiguo primero)
+        const historyInChronologicalOrder = result.rows.reverse();
+        // Formatear para la API de OpenAI
+        const formattedHistory = historyInChronologicalOrder.map(row => ({
+            role: row.sender === 'bot' ? 'assistant' : 'user',
+            content: row.content
+        }));
+        console.log(`(DB Service) Historial formateado encontrado para ${conversationId}: ${formattedHistory.length} mensajes.`);
+        return formattedHistory;
+    } catch (error) {
+        console.error(`(DB Service) Error al obtener historial de ${conversationId}:`, error);
+        throw error; // Re-lanzar
+    }
+};
+
+// --- Guardar Mensaje ---
+/**
+ * Guarda un mensaje en la base de datos y actualiza el timestamp de la conversación (usando transacción).
+ * @param {string} conversationId - El UUID de la conversación.
+ * @param {'user'|'bot'} sender - Quién envía el mensaje.
+ * @param {string} textContent - El contenido del mensaje.
+ */
+const saveMessage = async (conversationId, sender, textContent) => {
+    console.log(`(DB Service) Guardando mensaje para ${conversationId}: (${sender})`);
+    const insertMsgQuery = `INSERT INTO Messages (conversation_id, sender, content) VALUES ($1, $2, $3)`;
+    // Actualizar el timestamp de la última actividad en la conversación
+    const updateConvQuery = `UPDATE Conversations SET last_message_at = timezone('utc'::text, now()) WHERE conversation_id = $1`;
+    
+    const client = await pool.connect(); // Obtener un cliente del pool para la transacción
+    try {
+        await client.query('BEGIN'); // Iniciar transacción
+        await client.query(insertMsgQuery, [conversationId, sender, textContent]);
+        await client.query(updateConvQuery, [conversationId]);
+        await client.query('COMMIT'); // Confirmar transacción
+        console.log(`(DB Service) Mensaje guardado y conversación ${conversationId} actualizada.`);
+    } catch (error) {
+        await client.query('ROLLBACK'); // Deshacer transacción en caso de error
+        console.error(`(DB Service) Error al guardar mensaje para ${conversationId} (ROLLBACK ejecutado):`, error);
+        // No re-lanzamos el error necesariamente, depende de la lógica de negocio
+    } finally {
+        client.release(); // Devolver el cliente al pool
+    }
+};
+
+// --- Obtener o Crear Conversación ---
+/**
+ * Verifica si una conversationId existe para un cliente dado; si no, crea una nueva.
+ * @param {string} clientId - El UUID del cliente.
+ * @param {string|null} [conversationId=null] - Un ID de conversación existente para verificar.
+ * @returns {Promise<string>} - El ID de la conversación válida (existente o nueva).
+ */
+const getOrCreateConversation = async (clientId, conversationId = null) => {
+    console.log(`(DB Service) Obteniendo/Creando conversación para cliente ${clientId}, ID previo: ${conversationId}`);
+    const client = await pool.connect();
+    try {
+        // Si se proporciona un ID, verificar que existe y pertenece al cliente
         if (conversationId) {
-            const { data, error } = await supabase
-                .from(CONVERSATIONS_TABLE) // Usa constante
-                .select('conversation_id')
-                .eq('conversation_id', conversationId)
-                .eq('client_id', clientId) // Asegurar que pertenece al cliente
-                .maybeSingle(); // Devuelve uno o null, no array
-
-             if (error) throw error;
-             if (data) {
-                 console.log(`LOG (DB): Conversación existente ${conversationId} validada.`);
-                 return conversationId;
-             }
-             console.log(`LOG (DB): ID ${conversationId} inválido o no pertenece al cliente. Creando nueva.`);
+            const checkQuery = 'SELECT conversation_id FROM Conversations WHERE conversation_id = $1 AND client_id = $2';
+            const result = await client.query(checkQuery, [conversationId, clientId]);
+            if (result.rows.length > 0) {
+                console.log(`(DB Service) Conversación existente ${conversationId} validada para cliente ${clientId}.`);
+                return conversationId; // El ID es válido y pertenece al cliente
+            }
+            // Si no existe o no pertenece al cliente, se creará una nueva
+            console.log(`(DB Service) ID ${conversationId} inválido o no pertenece a ${clientId}. Creando una nueva.`);
         }
-
-        // Crear nueva conversación
+        
+        // Crear una nueva conversación si no se proporcionó ID o el ID era inválido
         const newConversationId = uuidv4();
-        const { data: insertData, error: insertError } = await supabase
-            .from(CONVERSATIONS_TABLE)
-            .insert({ conversation_id: newConversationId, client_id: clientId }) // last_message_at se actualiza al guardar mensaje? O poner now() aquí?
-            .select('conversation_id')
-            .single(); // Esperamos una sola fila
-
-        if (insertError) throw insertError;
-
-        const createdId = insertData?.conversation_id;
-         if (!createdId) throw new Error("No se pudo obtener el ID de la conversación creada.");
-
-        console.log(`LOG (DB): Nueva conversación creada con ID: ${createdId}`);
+        const insertQuery = `
+            INSERT INTO Conversations (conversation_id, client_id, last_message_at) 
+            VALUES ($1, $2, timezone('utc'::text, now())) 
+            RETURNING conversation_id
+        `;
+        const insertResult = await client.query(insertQuery, [newConversationId, clientId]);
+        const createdId = insertResult.rows[0].conversation_id;
+        console.log(`(DB Service) Nueva conversación creada con ID: ${createdId} para cliente ${clientId}`);
         return createdId;
     } catch (error) {
-        console.error(`ERROR (DB) en getOrCreateConversation para cliente ${clientId}:`, error);
-        return null; // Indicar error
+        console.error(`(DB Service) Error en getOrCreateConversation para cliente ${clientId}:`, error);
+        throw error; // Re-lanzar
+    } finally {
+        client.release();
     }
-}
+};
 
-// ... (Si necesitas getClientConfig, impleméntala aquí usando supabase)
-// export async function getClientConfig(clientId) { ... }
+// --- Guardar Fragmento de Conocimiento (RAG) ---
+/**
+ * Guarda un fragmento de texto y su vector de embedding en la tabla KnowledgeChunks.
+ * @param {string} clientId - El UUID del cliente.
+ * @param {string} chunkText - El texto del fragmento.
+ * @param {Array<number>} embeddingVector - El vector de embedding.
+ * @param {string|null} [sourceInfo=null] - Información sobre el origen (ej: URL).
+ */
+const saveKnowledgeChunk = async (clientId, chunkText, embeddingVector, sourceInfo = null) => {
+    // Convertir array a formato string de vector PostgreSQL: '[1.2,3.4,...]'
+    const vectorString = '[' + embeddingVector.join(',') + ']'; 
+    const query = `
+        INSERT INTO KnowledgeChunks (client_id, content_text, content_vector, source_info) 
+        VALUES ($1, $2, $3, $4) 
+        ON CONFLICT (chunk_id) DO NOTHING; -- O podrías usar DO UPDATE si quisieras actualizar
+    `;
+    try {
+        await pool.query(query, [clientId, chunkText, vectorString, sourceInfo]);
+        // Loguear solo el inicio del texto para evitar logs enormes
+        console.log(`(DB Service) Fragmento guardado para cliente ${clientId}. Origen: ${sourceInfo || 'N/A'}. Texto: "${chunkText.substring(0, 50)}..."`);
+    } catch (error) {
+        console.error(`(DB Service) Error al guardar fragmento para cliente ${clientId}:`, error);
+        // Considera si quieres re-lanzar el error o solo loguearlo
+    }
+};
+
+
+// --- Encontrar Conocimiento Relevante (RAG) ---
+// --- ¡¡¡ESTA ES LA FUNCIÓN MODIFICADA!!! ---
+/**
+ * Encuentra fragmentos de conocimiento relevantes para una pregunta dada,
+ * basándose en la similitud coseno de los embeddings.
+ * @param {string} clientId - El UUID del cliente.
+ * @param {Array<number>} questionVector - El vector de embedding de la pregunta.
+ * @param {number} [limit=3] - Número máximo de fragmentos a devolver.
+ * @param {number} [similarityThreshold=0.5] - Umbral mínimo de similitud coseno. ¡BAJADO PARA PRUEBA!
+ * @returns {Promise<Array<string>>} - Un array con los textos de los fragmentos relevantes.
+ */
+const findRelevantKnowledge = async (clientId, questionVector, limit = 3, similarityThreshold = 0.5) => { // <-- ¡UMBRAL BAJADO A 0.5!
+
+    // Convertimos el umbral de similitud (0 a 1, mayor es mejor) a umbral de distancia coseno (0 a 2, menor es mejor)
+    const distanceThreshold = 1 - similarityThreshold;
+    
+    // Log mejorado para depuración
+ console.log(`(DB Service) Buscando conocimiento relevante para cliente ${clientId} con umbral SIMILARIDAD >= ${similarityThreshold} (DISTANCIA < ${distanceThreshold})`); 
+
+ if (!questionVector || questionVector.length === 0) {
+        console.warn("(DB Service) Vector de pregunta vacío o inválido recibido en findRelevantKnowledge.");
+        return []; // Devuelve array vacío si no hay vector
+    }
+
+    // Convertir el array de JS a formato string de vector PostgreSQL
+    const vectorString = '[' + questionVector.join(',') + ']'; 
+    
+    // Consulta SQL usando el operador de distancia coseno (<=>) de pgvector
+const query = `
+SELECT 
+            content_text
+            /* , 1 - (content_vector <=> $2) AS similarity */ -- Descomentar para ver la puntuación exacta
+FROM KnowledgeChunks
+ WHERE 
+            client_id = $1                   -- Filtra por cliente
+ AND content_vector <=> $2 < $3     -- Filtra por distancia (vector <=> query_vector < distancia_maxima)
+ ORDER BY 
+            content_vector <=> $2            -- Ordena por distancia (los más cercanos primero)
+ LIMIT $4                           -- Limita el número de resultados
+ `;
+ 
+    try {
+        // Ejecutar la consulta pasando los parámetros correctos
+ const result = await pool.query(query, [clientId, vectorString, distanceThreshold, limit]); 
+
+        // Mapear los resultados para obtener solo el texto
+        const relevantTexts = result.rows.map(row => row.content_text);
+ 
+        // Loguear el resultado de la búsqueda
+        console.log(`(DB Service) Encontrados ${relevantTexts.length} fragmentos relevantes con umbral ${similarityThreshold}.`);
+        
+        // Opcional: Loguear scores si se descomentó en el SELECT
+        // if (result.rows.length > 0 && result.rows[0].similarity !== undefined) { 
+        //     console.log(`(DB Service) Scores de similitud encontrados: ${result.rows.map(r => r.similarity.toFixed(4))}`); 
+        // }
+
+ return relevantTexts; // Devolver los textos encontrados
+
+ } catch (error) {
+        // Manejo de errores específicos de pgvector/tabla
+if (error.message.includes('type "vector" does not exist') || error.message.includes('relation "knowledgechunks" does not exist')) { 
+            console.warn('(DB Service) Advertencia: Tabla KnowledgeChunks o extensión vector no encontrada. Asegúrate de que pgvector esté habilitado y la tabla exista.'); 
+            return []; // Devolver vacío si la tabla/extensión falta
+        }
+ if (error.message.includes('operator does not exist: vector <=> vector')) { 
+            console.warn('(DB Service) Advertencia: Operador <=> de pgvector no encontrado. Asegúrate de que la extensión pgvector esté correctamente instalada y habilitada en Supabase.'); 
+            return []; // Devolver vacío si el operador falta
+        }
+        // Error genérico
+ console.error(`(DB Service) Error durante la búsqueda vectorial para cliente ${clientId}:`, error);
+ return []; // Devolver array vacío en caso de otros errores
+ }
+};
+// --- FIN DE LA FUNCIÓN MODIFICADA ---
+
+
+// --- Exportaciones (Asegúrate de que estén todas las funciones que usas) ---
+module.exports = {
+    getClientConfig,
+    getConversationHistory,
+    saveMessage,
+    getOrCreateConversation,
+    findRelevantKnowledge,
+    saveKnowledgeChunk,
+    // pool // Exportar el pool directamente es generalmente desaconsejado
+};
