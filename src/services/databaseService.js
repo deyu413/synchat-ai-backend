@@ -1,10 +1,10 @@
 // src/services/databaseService.js
 import { supabase } from './supabaseClient.js'; // Importar cliente inicializado
-import { getEmbedding } from './embeddingService.js'; // Necesario para búsqueda híbrida aquí
+import { getEmbedding } from './embeddingService.js'; // Necesario para búsqueda híbrida
 
 // --- Configuración ---
-const HYBRID_SEARCH_VECTOR_WEIGHT = 0.4; // Peso para la similitud vectorial
-const HYBRID_SEARCH_FTS_WEIGHT = 0.6;    // Peso para el score de Full-Text Search
+const HYBRID_SEARCH_VECTOR_WEIGHT = 0.5; // Peso para la similitud vectorial (ajusta según veas necesario)
+const HYBRID_SEARCH_FTS_WEIGHT = 0.5;    // Peso para el score de Full-Text Search (ajusta según veas necesario)
 const HYBRID_SEARCH_LIMIT = 5;           // Límite de resultados combinados
 const VECTOR_MATCH_THRESHOLD = 0.65; // Umbral de similitud coseno (0 a 1, más alto es más similar)
 const HISTORY_MESSAGE_LIMIT = 8;       // Límite de mensajes de historial
@@ -28,7 +28,7 @@ export function getCache(key) {
 export function setCache(key, value) {
     const cacheKey = key.toLowerCase().trim();
     console.log(`(Cache) SET para: "${cacheKey.substring(0, 50)}..."`);
-    questionCache.set(cacheKey, value);
+    questionCache.set(key, value); // Usar key original aquí puede ser mejor si la necesitas luego
     // Opcional: Limitar tamaño de caché o añadir TTL
 }
 // --------------------------------
@@ -40,10 +40,10 @@ export const getClientConfig = async (clientId) => {
     console.log(`(DB Service) Buscando config para cliente: ${clientId}`);
     try {
         const { data, error } = await supabase
-            .from('Clients') // Asegúrate que la tabla se llama así
-            .select('client_id, client_name, base_prompt, knowledge_config') // Campos necesarios
+            .from('clients') // Usar nombre en minúsculas
+            .select('client_id, client_name, base_prompt, knowledge_config')
             .eq('client_id', clientId)
-            .maybeSingle(); // Devuelve un objeto o null
+            .maybeSingle();
 
         if (error) throw error;
 
@@ -55,7 +55,6 @@ export const getClientConfig = async (clientId) => {
         return data;
     } catch (error) {
         console.error(`(DB Service) Error al obtener config del cliente ${clientId}:`, error.message);
-        // No relanzar necesariamente, el controlador puede manejar null
         return null;
     }
 };
@@ -67,10 +66,10 @@ export const getConversationHistory = async (conversationId) => {
     console.log(`(DB Service) Buscando historial para conversación: ${conversationId}, límite: ${HISTORY_MESSAGE_LIMIT}`);
     try {
         const { data, error } = await supabase
-            .from('Messages') // Asegúrate que la tabla se llama así
+            .from('messages') // Usar nombre en minúsculas
             .select('sender, content')
             .eq('conversation_id', conversationId)
-            .order('timestamp', { ascending: true }) // Orden cronológico directo
+            .order('timestamp', { ascending: true })
             .limit(HISTORY_MESSAGE_LIMIT);
 
         if (error) throw error;
@@ -84,121 +83,115 @@ export const getConversationHistory = async (conversationId) => {
         return formattedHistory;
     } catch (error) {
         console.error(`(DB Service) Error al obtener historial de ${conversationId}:`, error.message);
-        return []; // Devolver array vacío en caso de error
+        return [];
     }
 };
 
 /**
  * Guarda un mensaje en la base de datos.
- * Nota: No actualiza 'last_message_at' en Conversations aquí por simplicidad,
- * podría hacerse con un trigger en Supabase o una llamada adicional.
  */
 export const saveMessage = async (conversationId, sender, textContent) => {
     console.log(`(DB Service) Guardando mensaje para ${conversationId}: (${sender})`);
     try {
         const { error } = await supabase
-            .from('Messages') // Asegúrate que la tabla se llama así
+            .from('messages') // Usar nombre en minúsculas
             .insert({
                 conversation_id: conversationId,
                 sender: sender,
                 content: textContent
-                // timestamp se debería añadir automáticamente por Supabase (default now())
             });
 
         if (error) throw error;
         console.log(`(DB Service) Mensaje guardado para ${conversationId}.`);
-        // TODO (Opcional): Actualizar Conversations.last_message_at si es necesario
+        // TODO (Opcional): Actualizar Conversations.last_message_at si es necesario (trigger en Supabase es buena opción)
+
     } catch (error) {
         console.error(`(DB Service) Error al guardar mensaje para ${conversationId}:`, error.message);
-        // No relanzar, es un error no crítico para la respuesta al usuario
     }
 };
 
 /**
- * Obtiene o crea una conversación.
+ * Obtiene o crea una conversación. Devuelve el ID de la conversación.
  */
 export const getOrCreateConversation = async (clientId) => {
-    console.log(`(DB Service) Obteniendo/Creando conversación para cliente ${clientId}`);
+    console.log(`(DB Service) Creando nueva conversación para cliente ${clientId}`); // Simplificado para siempre crear
     try {
-        // Intentar crear directamente. Si ya existe por (client_id, posible_id_unico),
-        // Supabase podría dar un error de constraint si se configura así, o simplemente creamos una nueva.
-        // La forma más simple es siempre crear una nueva al llamar a /start.
         const { data, error } = await supabase
-            .from('Conversations') // Asegúrate que la tabla se llama así
-            .insert({ client_id: clientId }) // Supabase genera conversation_id (UUID) por defecto
-            .select('conversation_id') // Devolver el ID generado
-            .single(); // Esperamos una sola fila
+            .from('conversations') // Usar nombre en minúsculas
+            .insert({ client_id: clientId })
+            .select('conversation_id')
+            .single();
 
         if (error) throw error;
 
         const createdId = data.conversation_id;
-        console.log(`(DB Service) Nueva conversación creada/obtenida con ID: ${createdId} para cliente ${clientId}`);
+        console.log(`(DB Service) Nueva conversación creada con ID: ${createdId} para cliente ${clientId}`);
         return createdId;
 
     } catch (error) {
         console.error(`(DB Service) Error en getOrCreateConversation para cliente ${clientId}:`, error.message);
-        throw error; // Re-lanzar para que el controlador maneje el error 500
+        throw error;
     }
 };
 
 /**
- * Realiza una búsqueda híbrida (vectorial + FTS) en la base de conocimiento.
+ * Realiza una búsqueda híbrida (vectorial + FTS) usando funciones RPC de Supabase.
  */
 export const hybridSearch = async (clientId, query) => {
-    console.log(`(DB Service) Iniciando búsqueda híbrida para cliente ${clientId}, query: "${query.substring(0, 50)}..."`);
+    console.log(`(DB Service) Iniciando búsqueda híbrida RPC para cliente ${clientId}, query: "${query.substring(0, 50)}..."`);
 
     try {
         // 1. Generar Embedding para la consulta
         const queryEmbedding = await getEmbedding(query);
         if (!queryEmbedding) {
-            console.warn("(DB Service) No se pudo generar embedding para la consulta. Realizando solo FTS.");
+            console.warn("(DB Service) No se pudo generar embedding para la consulta. Saltando búsqueda vectorial.");
             // Podríamos optar por solo hacer FTS si falla el embedding
-            // return await fullTextSearchOnly(clientId, query); // Función auxiliar (no implementada aquí)
-            return []; // O devolver vacío
+            // Por ahora, devolvemos vacío si no hay embedding
+            return [];
         }
 
-        // 2. Búsqueda Vectorial (usando RPC)
-        console.log(`(DB Service) Ejecutando RPC vector_search (threshold: ${VECTOR_MATCH_THRESHOLD})`);
-        const { data: vectorResults, error: rpcError } = await supabase.rpc('vector_search', {
-            client_id_param: clientId, // Renombrado para evitar colisión con nombres de columna
-            query_embedding: queryEmbedding,
-            match_threshold: VECTOR_MATCH_THRESHOLD,
-            match_count: HYBRID_SEARCH_LIMIT // Pedir límite inicial
-        });
-
-        if (rpcError) {
-            console.error("(DB Service) Error en RPC vector_search:", rpcError.message);
-            // Considerar si continuar solo con FTS o fallar
-            return []; // Fallar por ahora si RPC falla
-        }
-        console.log(`(DB Service) Vector search encontró ${vectorResults?.length || 0} resultados.`);
-
-        // 3. Búsqueda Full-Text
-        console.log("(DB Service) Ejecutando Full-Text Search");
-        const { data: textResults, error: ftsError } = await supabase
-            .from('knowledge_base') // Asegúrate que la tabla se llama así
-            .select('content, metadata, ts_rank(fts, websearch_to_tsquery(\'spanish\', $1)) as score') // Seleccionar contenido, metadata y score
-            .textSearch('fts', query, { // 'fts' debe ser la columna tsvector
-                type: 'websearch',
-                config: 'spanish'
+        // 2. Ejecutar Búsquedas RPC en Paralelo
+        console.log("(DB Service) Ejecutando RPCs vector_search y fts_search_with_rank en paralelo...");
+        const [vectorResponse, ftsResponse] = await Promise.all([
+            supabase.rpc('vector_search', { // RPC para búsqueda vectorial
+                client_id_param: clientId,
+                query_embedding: queryEmbedding,
+                match_threshold: VECTOR_MATCH_THRESHOLD,
+                match_count: HYBRID_SEARCH_LIMIT * 2 // Pedir un poco más para combinar mejor
+            }),
+            supabase.rpc('fts_search_with_rank', { // RPC para FTS con ranking
+                client_id_param: clientId,
+                query_param: query,
+                match_count: HYBRID_SEARCH_LIMIT * 2 // Pedir un poco más para combinar mejor
             })
-            .eq('client_id', clientId) // Filtrar por cliente también en FTS
-            .limit(HYBRID_SEARCH_LIMIT); // Limitar resultados FTS
+        ]);
 
-        if (ftsError) {
-            console.error("(DB Service) Error en Full-Text Search:", ftsError.message);
-            // Considerar si continuar solo con Vector o fallar
-            return vectorResults || []; // Devolver resultados vectoriales si FTS falla
+        // Manejar errores de las RPC
+        if (vectorResponse.error) {
+            console.error("(DB Service) Error en RPC vector_search:", vectorResponse.error.message);
+            // Podríamos continuar solo con FTS, pero por ahora devolvemos vacío si falla vector
+            return [];
         }
-        console.log(`(DB Service) Full-Text search encontró ${textResults?.length || 0} resultados.`);
+        const vectorResults = vectorResponse.data || [];
+        console.log(`(DB Service) Vector search (RPC) encontró ${vectorResults.length} resultados.`);
 
-        // 4. Combinar y Re-rankear Resultados
+        if (ftsResponse.error) {
+            console.error("(DB Service) Error en RPC fts_search_with_rank:", ftsResponse.error.message);
+            // Si FTS falla, podemos continuar solo con los resultados vectoriales
+            console.warn("(DB Service) FTS RPC falló, continuando solo con resultados vectoriales.");
+            // return vectorResults.map(r => ({...r, hybrid_score: r.similarity * HYBRID_SEARCH_VECTOR_WEIGHT })).slice(0, HYBRID_SEARCH_LIMIT); // Opcional
+        }
+        const textResults = ftsResponse.data || []; // Usar array vacío si FTS falló
+        console.log(`(DB Service) FTS search (RPC) encontró ${textResults.length} resultados.`);
+
+
+        // 3. Combinar y Re-rankear Resultados
         const combinedResults = {};
 
-        // Añadir resultados vectoriales (dar prioridad a similitud)
-        (vectorResults || []).forEach(row => {
-            // Asumir que RPC devuelve 'id', 'content', 'metadata', 'similarity'
-            const id = row.id; // Necesitas un ID único por chunk
+        // Añadir resultados vectoriales (tienen 'similarity')
+        vectorResults.forEach(row => {
+            const id = row.id; // Asume que RPC devuelve 'id' tipo bigint
+            if (!id) return;
             if (!combinedResults[id]) {
                 combinedResults[id] = { ...row, vector_similarity: row.similarity || 0, fts_score: 0 };
             } else {
@@ -206,37 +199,50 @@ export const hybridSearch = async (clientId, query) => {
             }
         });
 
-        // Añadir resultados FTS (dar prioridad a score)
-        (textResults || []).forEach(row => {
-             // Asumir que FTS devuelve 'id', 'content', 'metadata', 'score'
-            const id = row.id; // Necesitas un ID único por chunk
+        // Añadir resultados FTS (tienen 'score')
+        textResults.forEach(row => {
+            const id = row.id; // Asume que RPC devuelve 'id' tipo bigint
+            if (!id) return;
+            const ftsScore = row.score || 0; // Score viene de la RPC
             if (!combinedResults[id]) {
-                combinedResults[id] = { ...row, vector_similarity: 0, fts_score: row.score || 0 };
+                combinedResults[id] = { ...row, vector_similarity: 0, fts_score: ftsScore };
             } else {
-                combinedResults[id].fts_score = Math.max(combinedResults[id].fts_score, row.score || 0);
-                 // Si ya existía, copiar content/metadata si no los tenía de la búsqueda vectorial
-                 if (!combinedResults[id].content) combinedResults[id].content = row.content;
-                 if (!combinedResults[id].metadata) combinedResults[id].metadata = row.metadata;
+                combinedResults[id].fts_score = Math.max(combinedResults[id].fts_score, ftsScore);
+                // Copiar metadata/content si faltaba (si RPC no los devolvió en el primer hit)
+                if (!combinedResults[id].content && row.content) combinedResults[id].content = row.content;
+                if (!combinedResults[id].metadata && row.metadata) combinedResults[id].metadata = row.metadata;
             }
         });
 
         // Calcular score híbrido y ordenar
         const rankedResults = Object.values(combinedResults)
+            .filter(item => item.id && item.content) // Asegurarse que tenemos datos básicos
             .map(item => ({
                 ...item,
-                hybrid_score: (item.vector_similarity * HYBRID_SEARCH_VECTOR_WEIGHT) + (item.fts_score * HYBRID_SEARCH_FTS_WEIGHT)
+                // Fórmula de puntuación híbrida usando los pesos definidos
+                hybrid_score: ((item.vector_similarity || 0) * HYBRID_SEARCH_VECTOR_WEIGHT) + ((item.fts_score || 0) * HYBRID_SEARCH_FTS_WEIGHT)
             }))
-            .sort((a, b) => b.hybrid_score - a.hybrid_score)
+            .sort((a, b) => b.hybrid_score - a.hybrid_score) // Ordenar por mayor puntuación híbrida
             .slice(0, HYBRID_SEARCH_LIMIT); // Aplicar límite final
 
         console.log(`(DB Service) Búsqueda híbrida completada. Resultados finales: ${rankedResults.length}`);
-        // console.log("Resultados Híbridos:", rankedResults.map(r => ({id: r.id, score: r.hybrid_score.toFixed(4)}))); // Log para debug
+        // console.log("Resultados Híbridos:", rankedResults.map(r => ({id: r.id, score: r.hybrid_score.toFixed(4), vector_sim: (r.vector_similarity || 0).toFixed(4), fts_score: (r.fts_score || 0).toFixed(4) }))); // Log para debug
 
-        return rankedResults; // Devolver objetos completos { content, metadata, scores... }
+        // Devolver solo las propiedades necesarias para el controlador
+        // (content y metadata son las más importantes para el prompt)
+        return rankedResults.map(r => ({
+             id: r.id,
+             content: r.content,
+             metadata: r.metadata,
+             // Opcional: devolver scores si quieres mostrarlos o usarlos después
+             // similarity: r.vector_similarity,
+             // fts_score: r.fts_score,
+             // hybrid_score: r.hybrid_score
+            }));
 
     } catch (error) {
         console.error(`(DB Service) Error general durante la búsqueda híbrida para cliente ${clientId}:`, error.message);
-        return []; // Devolver array vacío en caso de error grave
+        return [];
     }
 };
 
