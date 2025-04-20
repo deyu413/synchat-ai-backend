@@ -1,27 +1,21 @@
-// En src/routes/api.js
-const express = require('express');
+// src/routes/api.js (Convertido a ES Modules)
+import express from 'express';
+// Importar funciones específicas del controlador
+import { handleChatMessage, startConversation } from '../controllers/chatController.js'; // <-- Necesita .js
+
 const router = express.Router();
 
-// --- Asegúrate que la ruta al controlador sea correcta ---
-// Importar el controlador UNA SOLA VEZ al principio
-const chatController = require('../controllers/chatController');
-
-// --- Log de diagnóstico ---
 console.log('>>> api.js: Cargando el router de API');
 
-// --- Definición de Rutas ---
-
-// Ruta para iniciar una nueva conversación (devuelve el ID)
 // POST /api/chat/start
-router.post('/start', chatController.startConversation);
+// Necesita recibir { clientId } en el body
+router.post('/start', startConversation); // Llama a la nueva función
 
-// Ruta para enviar un mensaje dentro de una conversación existente
 // POST /api/chat/message
-router.post('/message', chatController.handleChatMessage);
+// Necesita recibir { clientId, conversationId, message } en el body
+router.post('/message', handleChatMessage); // Llama a la función existente
 
-// Ruta para obtener historial (a implementar en controller si se necesita)
-// GET /api/chat/history?conversationId=...
-// router.get('/history', chatController.getHistory); // Mantenida comentada
+// GET /api/chat/history?conversationId=... (Si la implementas)
+// router.get('/history', getHistoryHandler); // Necesitarías un manejador para esto
 
-// --- Exportar el router DESPUÉS de definir las rutas y UNA SOLA VEZ ---
-module.exports = router;
+export default router; // Usar export default

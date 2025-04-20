@@ -1,6 +1,7 @@
 // src/services/databaseService.js
 import 'dotenv/config';
 import { createClient } from '@supabase/supabase-js';
+import { v4 as uuidv4 } from 'uuid'; // Necesario para getOrCreateConversation
 
 // Inicializar cliente Supabase
 if (!process.env.SUPABASE_URL) throw new Error('SUPABASE_URL falta en .env');
@@ -8,234 +9,196 @@ if (!process.env.SUPABASE_KEY) throw new Error('SUPABASE_KEY (Service Role) falt
 const supabase = createClient(process.env.SUPABASE_URL, process.env.SUPABASE_KEY);
 console.log("LOG (DB): Supabase client initialized in databaseService.");
 
+// Nombres de tablas (centralizar)
 const KNOWLEDGE_TABLE = 'knowledge_base';
-const MESSAGES_TABLE = 'Messages'; // Asume que tu tabla de mensajes se llama así
-const CONVERSATIONS_TABLE = 'Conversations'; // Asume que tu tabla de conversaciones se llama así
-const MIN_CHUNK_WORDS_FOR_STORAGE = parseInt(process.env.MIN_CHUNK_WORDS || '30');
+const MESSAGES_TABLE = 'Messages';
+const CONVERSATIONS_TABLE = 'Conversations';
+const CLIENTS_TABLE = 'Clients'; // Asume que tu tabla de clientes se llama así
 
-// ----- Funciones de Búsqueda Híbrida y Caché -----
+// Constantes
+const MIN_CHUNK_WORDS_FOR_STORAGE = 30;
+const SIMILARITY_THRESHOLD = 0.55; // <-- ¡Umbral Corregido y Razonable! ¡AJUSTAR CON PRUEBAS!
+const MATCH_COUNT = 5;
+const CACHE_TTL_MS = 5 * 60 * 1000;
 
-// !!!!! UMBRAL DE SIMILITUD - ¡AJUSTAR DESPUÉS DE PROBAR! !!!!!
-// Empezamos con 0.55 que es más razonable para OpenAI que 0.82.
-const SIMILARITY_THRESHOLD = 0.55; // <-- ¡UMBRAL CORREGIDO Y RAZONABLE!
+// --- Caché en Memoria Simple ---
+const questionCache = new Map();
 
-const MATCH_COUNT = 5; // Max resultados RAG
-
-const questionCache = new Map(); // Caché simple en memoria para resultados de búsqueda
-const CACHE_TTL_MS = 5 * 60 * 1000; // 5 minutos
-
-function getCache(key) {
+export function getCache(key) {
     const entry = questionCache.get(key);
     if (entry && Date.now() < entry.expiry) {
         console.log(`LOG (Cache): Cache HIT para key: ${key.substring(0,50)}...`);
         return entry.value;
     }
-     if (entry) { questionCache.delete(key); } // Limpiar expirada
+     if (entry) { questionCache.delete(key); }
     return null;
 }
 
-function setCache(key, value) {
+export function setCache(key, value) {
     console.log(`LOG (Cache): Setting cache para key: ${key.substring(0,50)}...`);
     const expiry = Date.now() + CACHE_TTL_MS;
     questionCache.set(key, { value, expiry });
-    // Limpiar caché si crece mucho
-    if (questionCache.size > 500) { // Límite ejemplo
-        const oldestKey = questionCache.keys().next().value;
-        questionCache.delete(oldestKey);
-        console.log("LOG (Cache): Cache pruned.");
-    }
+    if (questionCache.size > 500) { /* ... pruning ... */ }
 }
 
+// --- Búsqueda Híbrida ---
 /**
- * Realiza búsqueda híbrida (Vector + FTS). Recibe embedding pre-calculado.
- * @param {string} clientId
- * @param {string} query - Texto original de la pregunta (para FTS).
- * @param {Array<number>|null} queryEmbedding - Embedding de la pregunta.
- * @returns {Promise<Array<object>>} - Resultados combinados y ordenados.
+ * Realiza búsqueda híbrida. Recibe embedding pre-calculado.
  */
 export async function hybridSearch(clientId, query, queryEmbedding) {
-    const cacheKey = `hybridSearch:${clientId}:${query}`;
-    const cachedResult = getCache(cacheKey);
-    if (cachedResult) return cachedResult;
-
+    // (Pega aquí la LÓGICA COMPLETA de hybridSearch CORREGIDA de mi respuesta anterior)
+    // Asegúrate de que usa SIMILARITY_THRESHOLD = 0.55 y llama a la función SQL 'vector_search'
+    // --- INICIO CÓDIGO PEGADO hybridSearch ---
+    const cacheKey = `hybridSearch:${clientId}:${query}`; const cachedResult = getCache(cacheKey); if (cachedResult) return cachedResult;
     console.log(`LOG (Search): Iniciando búsqueda híbrida para cliente ${clientId}. Query: "${query.substring(0,50)}..."`);
-
-    if (!queryEmbedding) {
-        console.warn("WARN (Search): queryEmbedding nulo. Realizando solo búsqueda FTS.");
-    }
-
-    let vectorResults = [];
-    let fullTextResults = [];
-    let combinedResults = [];
-
+    if (!queryEmbedding) { console.warn("WARN (Search): queryEmbedding nulo. Realizando solo búsqueda FTS."); }
+    let vectorResults = []; let fullTextResults = []; let combinedResults = [];
     try {
-        // --- 1. Búsqueda Vectorial ---
         if (queryEmbedding) {
-            console.log(`LOG (Search): Ejecutando búsqueda vectorial (RPC vector_search) umbral >= ${SIMILARITY_THRESHOLD}...`);
-            const { data: rpcData, error: rpcError } = await supabase.rpc('vector_search', {
-                client_id_input: clientId,
-                query_embedding: queryEmbedding,
-                similarity_threshold: SIMILARITY_THRESHOLD, // Usar umbral ajustado
-                match_count: MATCH_COUNT
-            });
-            if (rpcError) { console.error("ERROR (Search): Error en RPC vector_search:", rpcError); }
-            else {
-                vectorResults = rpcData || [];
-                vectorResults.forEach(r => r.score = r.similarity); // Asignar score vectorial
-                console.log(`LOG (Search): Búsqueda vectorial encontró ${vectorResults.length}.`);
-            }
+            console.log(`LOG (Search): Ejecutando RPC vector_search umbral >= ${SIMILARITY_THRESHOLD}...`);
+            const { data: rpcData, error: rpcError } = await supabase.rpc('vector_search', { client_id_input: clientId, query_embedding: queryEmbedding, similarity_threshold: SIMILARITY_THRESHOLD, match_count: MATCH_COUNT });
+            if (rpcError) { console.error("ERROR (Search): RPC vector_search:", rpcError); }
+            else { vectorResults = rpcData || []; vectorResults.forEach(r => r.score = r.similarity); console.log(`LOG (Search): Vectorial encontró ${vectorResults.length}.`); }
         }
-
-        // --- 2. Búsqueda Full-Text (FTS) ---
-        console.log("LOG (Search): Ejecutando búsqueda full-text...");
-        const ftsQuery = query.split(/\s+/).filter(Boolean).join(' | '); // websearch format
+        console.log("LOG (Search): Ejecutando búsqueda FTS...");
+        const ftsQuery = query.split(/\s+/).filter(Boolean).join(' | ');
         if (ftsQuery) {
-            const { data: ftsData, error: ftsError } = await supabase
-                .from(KNOWLEDGE_TABLE)
-                .select('id, content, metadata, ts_rank(to_tsvector(\'spanish\', content), websearch_to_tsquery(\'spanish\', $1)) as score_fts')
-                .eq('client_id', clientId)
-                .textSearch('content', ftsQuery, { type: 'websearch', config: 'spanish' })
-                .order('score_fts', { ascending: false })
-                .limit(MATCH_COUNT);
-
-            if (ftsError) { console.error("ERROR (Search): Error en búsqueda FTS:", ftsError); }
-            else {
-                fullTextResults = ftsData || [];
-                // Asignar score normalizado heurísticamente para FTS
-                fullTextResults.forEach(r => r.score = r.score_fts > 0 ? 0.1 + (r.score_fts * 0.4) : 0.1);
-                console.log(`LOG (Search): Búsqueda FTS encontró ${fullTextResults.length}.`);
-                 // TODO: Validar/mejorar esta normalización o usar RRF.
-            }
-        } else { console.log("LOG (Search): Búsqueda FTS omitida (query vacía)."); }
-
-        // --- 3. Combinar y Ordenar ---
+            const { data: ftsData, error: ftsError } = await supabase.from(KNOWLEDGE_TABLE).select('id, content, metadata, ts_rank(to_tsvector(\'spanish\', content), websearch_to_tsquery(\'spanish\', $1)) as score_fts').eq('client_id', clientId).textSearch('content', ftsQuery, { type: 'websearch', config: 'spanish' }).order('score_fts', { ascending: false }).limit(MATCH_COUNT);
+            if (ftsError) { console.error("ERROR (Search): FTS:", ftsError); }
+            else { fullTextResults = ftsData || []; fullTextResults.forEach(r => r.score = r.score_fts > 0 ? 0.1 + (r.score_fts * 0.4) : 0.1); console.log(`LOG (Search): FTS encontró ${fullTextResults.length}.`); }
+        } else { console.log("LOG (Search): FTS omitida."); }
         console.log("LOG (Search): Combinando resultados...");
         const combined = new Map();
-        // Prioridad a resultados vectoriales
         vectorResults.forEach(r => { if (r?.id) combined.set(r.id, r); });
-        // Añadir FTS si no existe
         fullTextResults.forEach(r => { if (r?.id && !combined.has(r.id)) combined.set(r.id, r); });
         combinedResults = Array.from(combined.values());
-        // Ordenar por score (descendente)
-        combinedResults.sort((a, b) => (b.score ?? 0) - (a.score ?? 0));
+        combinedResults.sort((a, b) => (b.score ?? 0) - (a.score ?? 0)); // TODO: Mejorar combinación
         const finalResults = combinedResults.slice(0, MATCH_COUNT);
-        console.log(`LOG (Search): Devolviendo ${finalResults.length} resultados combinados y ordenados.`);
-
-        // Guardar en caché
-        setCache(cacheKey, finalResults);
-        return finalResults;
-
-    } catch (error) {
-        console.error(`ERROR FATAL durante hybridSearch:`, error);
-        return [];
-    }
+        console.log(`LOG (Search): Devolviendo ${finalResults.length} resultados combinados.`);
+        setCache(cacheKey, finalResults); return finalResults;
+    } catch (error) { console.error(`ERROR FATAL durante hybridSearch:`, error); return []; }
+    // --- FIN CÓDIGO PEGADO hybridSearch ---
 }
 
 // ----- Funciones de Almacenamiento (Ingesta) -----
-
-/**
- * Almacena chunks procesados en la tabla knowledge_base.
- * @param {string} clientId
- * @param {Array<object>} chunksWithEmbeddings - Chunks con {text, metadata, embedding}.
- * @returns {Promise<{insertedCount: number, errors: Array<string>}>} Resumen.
- */
 export async function storeChunks(clientId, chunksWithEmbeddings) {
-    // (Misma función robusta con validación y lotes que te di antes)
-    console.log(`LOG (DB): Iniciando storeChunks para ${clientId}. Recibidos ${chunksWithEmbeddings?.length ?? 0} chunks.`);
-     if (!chunksWithEmbeddings || chunksWithEmbeddings.length === 0) {
-         console.warn("WARN (DB): No hay chunks con embeddings para guardar.");
-         return { insertedCount: 0, errors: ["No chunks received"] };
+    // (Pega aquí la función storeChunks COMPLETA y robusta que te di antes)
+     // --- INICIO CÓDIGO PEGADO storeChunks ---
+     console.log(`LOG (DB): Iniciando storeChunks para ${clientId}. Recibidos ${chunksWithEmbeddings?.length ?? 0} chunks.`);
+     if (!chunksWithEmbeddings || chunksWithEmbeddings.length === 0) { console.warn("WARN (DB): No hay chunks con embeddings para guardar."); return { insertedCount: 0, errors: ["No chunks received"] }; }
+     const validChunksData = chunksWithEmbeddings.filter(c => c.text && c.text.split(/\s+/).length >= MIN_CHUNK_WORDS_FOR_STORAGE && c.embedding && c.embedding.length === 1536 && c.metadata?.url).map(c => ({ client_id: clientId, content: c.text, embedding: c.embedding, metadata: c.metadata }));
+     const discardedCount = chunksWithEmbeddings.length - validChunksData.length;
+     if (discardedCount > 0) { console.warn(`WARN (DB): Se descartaron ${discardedCount} chunks por datos inválidos/cortos.`); }
+     if (validChunksData.length === 0) { console.error("ERROR (DB): No quedaron chunks válidos para insertar."); return { insertedCount: 0, errors: ["No valid chunks to insert"] }; }
+     console.log(`LOG (DB): Preparados ${validChunksData.length} registros válidos para insertar.`);
+     const INSERT_BATCH_SIZE = 100; let successfulInserts = 0; const errors = [];
+     for(let i = 0; i < validChunksData.length; i += INSERT_BATCH_SIZE) {
+         const batchToInsert = validChunksData.slice(i, i + INSERT_BATCH_SIZE);
+         console.log(`LOG (DB): Intentando insertar lote ${Math.floor(i/INSERT_BATCH_SIZE) + 1}/${Math.ceil(validChunksData.length/INSERT_BATCH_SIZE)} (${batchToInsert.length} registros)...`);
+         try {
+             const { error, count } = await supabase.from(KNOWLEDGE_TABLE).insert(batchToInsert, { count: 'exact' });
+             if (error) { console.error(`ERROR (DB) insertando lote ${Math.floor(i/INSERT_BATCH_SIZE) + 1}:`, error); errors.push(`Batch ${Math.floor(i/INSERT_BATCH_SIZE) + 1}: ${error.message}`); }
+             else { console.log(`LOG (DB): Lote ${Math.floor(i/INSERT_BATCH_SIZE) + 1} guardado exitosamente (Count: ${count}).`); successfulInserts += count || batchToInsert.length; }
+         } catch (batchError) { console.error(`ERROR FATAL (DB) insertando lote ${Math.floor(i/INSERT_BATCH_SIZE) + 1}:`, batchError); errors.push(`Batch ${Math.floor(i/INSERT_BATCH_SIZE) + 1} (Fatal): ${batchError.message}`); }
      }
-    const validChunksData = chunksWithEmbeddings.filter(c => c.text && c.text.split(/\s+/).length >= MIN_CHUNK_WORDS_FOR_STORAGE && c.embedding && c.embedding.length === 1536 && c.metadata?.url).map(c => ({ client_id: clientId, content: c.text, embedding: c.embedding, metadata: c.metadata }));
-    const discardedCount = chunksWithEmbeddings.length - validChunksData.length;
-    if (discardedCount > 0) { console.warn(`WARN (DB): Se descartaron ${discardedCount} chunks por datos inválidos/cortos.`); }
-    if (validChunksData.length === 0) { console.error("ERROR (DB): No quedaron chunks válidos para insertar."); return { insertedCount: 0, errors: ["No valid chunks to insert"] }; }
-    console.log(`LOG (DB): Preparados ${validChunksData.length} registros válidos para insertar.`);
-    const INSERT_BATCH_SIZE = 100;
-    let successfulInserts = 0;
-    const errors = [];
-    for(let i = 0; i < validChunksData.length; i += INSERT_BATCH_SIZE) {
-        const batchToInsert = validChunksData.slice(i, i + INSERT_BATCH_SIZE);
-        console.log(`LOG (DB): Intentando insertar lote ${Math.floor(i/INSERT_BATCH_SIZE) + 1}/${Math.ceil(validChunksData.length/INSERT_BATCH_SIZE)} (${batchToInsert.length} registros)...`);
-        try {
-            const { error, count } = await supabase.from(KNOWLEDGE_TABLE).insert(batchToInsert, { count: 'exact' });
-            if (error) { console.error(`ERROR (DB) insertando lote ${Math.floor(i/INSERT_BATCH_SIZE) + 1}:`, error); errors.push(`Batch ${Math.floor(i/INSERT_BATCH_SIZE) + 1}: ${error.message}`); }
-            else { console.log(`LOG (DB): Lote ${Math.floor(i/INSERT_BATCH_SIZE) + 1} guardado exitosamente (Count: ${count}).`); successfulInserts += count || batchToInsert.length; }
-        } catch (batchError) { console.error(`ERROR FATAL (DB) insertando lote ${Math.floor(i/INSERT_BATCH_SIZE) + 1}:`, batchError); errors.push(`Batch ${Math.floor(i/INSERT_BATCH_SIZE) + 1} (Fatal): ${batchError.message}`); }
-    }
-    console.log(`--- RESULTADO storeChunks: Insertados ${successfulInserts}/${validChunksData.length} registros válidos. Errores: ${errors.length}. ---`);
-    return { insertedCount: successfulInserts, errors: errors };
+     console.log(`--- RESULTADO storeChunks: Insertados ${successfulInserts}/${validChunksData.length} registros válidos. Errores: ${errors.length}. ---`);
+     return { insertedCount: successfulInserts, errors: errors };
+     // --- FIN CÓDIGO PEGADO storeChunks ---
 }
 
-// ----- Funciones de Historial (¡IMPLEMENTAR!) -----
-
+// ----- Funciones de Historial (¡IMPLEMENTADAS!) -----
 /**
  * Obtiene los últimos N mensajes de una conversación.
- * @param {string} conversationId
- * @param {number} [limit=10] - Límite MÁXIMO de mensajes a devolver
- * @returns {Promise<Array<{role: 'user'|'assistant', content: string}>>}
  */
 export async function getConversationHistory(conversationId, limit = 10) {
-   console.log(`LOG (DB): Buscando historial para conversación: ${conversationId}, límite ${limit}`);
+   console.log(`LOG (DB): Buscando historial para CV: ${conversationId}, límite ${limit}`);
    if (!conversationId) return [];
    try {
-       // Asegúrate que tu tabla se llama 'Messages' y las columnas 'conversation_id', 'sender', 'content', 'timestamp'
        const { data, error } = await supabase
-          .from(MESSAGES_TABLE)
+          .from(MESSAGES_TABLE) // Usa constante
           .select('sender, content')
           .eq('conversation_id', conversationId)
-          .order('timestamp', { ascending: false }) // Obtener los más recientes primero
+          .order('timestamp', { ascending: false })
           .limit(limit);
+       if (error) throw error; // Lanza error para capturar abajo
 
-       if (error) {
-           console.error(`ERROR (DB) obteniendo historial para ${conversationId}:`, error);
-           return [];
-       }
-       // Invertir para orden cronológico y mapear al formato de OpenAI
        const history = (data || []).reverse().map(row => ({
            role: row.sender === 'bot' ? 'assistant' : 'user',
            content: row.content
        }));
         console.log(`LOG (DB): Historial encontrado para ${conversationId}: ${history.length} mensajes.`);
         return history;
-
    } catch (error) {
-       console.error(`ERROR FATAL (DB) obteniendo historial de ${conversationId}:`, error);
-       return [];
+       console.error(`ERROR (DB) al obtener historial de ${conversationId}:`, error);
+       return []; // Devolver vacío en caso de error
    }
 }
 
 /**
  * Guarda un mensaje en la base de datos.
- * @param {string} conversationId
- * @param {'user'|'bot'} sender
- * @param {string} textContent
- * @returns {Promise<boolean>} - true si tuvo éxito, false si falló
  */
 export async function saveMessage(conversationId, sender, textContent) {
     console.log(`LOG (DB): Guardando mensaje para ${conversationId} (${sender})`);
-    if (!conversationId || !sender || !textContent) {
-         console.error("ERROR (DB) saveMessage: Faltan parámetros.");
-         return false;
-    }
+    if (!conversationId || !sender || !textContent) { /* ... error ... */ return false; }
     try {
-        // Asegúrate que tu tabla se llama 'Messages' y tiene estas columnas
+        // TODO: Considerar transacción si actualizas Conversations.last_message_at
         const { error } = await supabase
-            .from(MESSAGES_TABLE)
+            .from(MESSAGES_TABLE) // Usa constante
             .insert([{ conversation_id: conversationId, sender, content: textContent }]);
-
-        if (error) {
-            console.error(`ERROR (DB) al guardar mensaje para ${conversationId}:`, error);
-            return false;
-        }
+        if (error) throw error; // Lanza error
         console.log(`LOG (DB): Mensaje guardado OK para ${conversationId}.`);
-        // TODO: Considerar actualizar Conversations.last_message_at (posiblemente en transacción)
         return true;
     } catch (error) {
-         console.error(`ERROR FATAL (DB) al guardar mensaje para ${conversationId}:`, error);
+         console.error(`ERROR (DB) al guardar mensaje para ${conversationId}:`, error);
          return false;
     }
 }
 
-// ... otras funciones como getClientConfig, getOrCreateConversation ...
-//     (Asegúrate de implementarlas o importarlas si las necesitas)
+/**
+ * Obtiene o crea una conversación.
+ * @param {string} clientId
+ * @param {string|null} [conversationId=null]
+ * @returns {Promise<string|null>} El ID de la conversación o null si hay error.
+ */
+export async function getOrCreateConversation(clientId, conversationId = null) {
+    console.log(`LOG (DB): Obteniendo/Creando conversación para cliente ${clientId}, ID previo: ${conversationId}`);
+     try {
+        if (conversationId) {
+            const { data, error } = await supabase
+                .from(CONVERSATIONS_TABLE) // Usa constante
+                .select('conversation_id')
+                .eq('conversation_id', conversationId)
+                .eq('client_id', clientId) // Asegurar que pertenece al cliente
+                .maybeSingle(); // Devuelve uno o null, no array
+
+             if (error) throw error;
+             if (data) {
+                 console.log(`LOG (DB): Conversación existente ${conversationId} validada.`);
+                 return conversationId;
+             }
+             console.log(`LOG (DB): ID ${conversationId} inválido o no pertenece al cliente. Creando nueva.`);
+        }
+
+        // Crear nueva conversación
+        const newConversationId = uuidv4();
+        const { data: insertData, error: insertError } = await supabase
+            .from(CONVERSATIONS_TABLE)
+            .insert({ conversation_id: newConversationId, client_id: clientId }) // last_message_at se actualiza al guardar mensaje? O poner now() aquí?
+            .select('conversation_id')
+            .single(); // Esperamos una sola fila
+
+        if (insertError) throw insertError;
+
+        const createdId = insertData?.conversation_id;
+         if (!createdId) throw new Error("No se pudo obtener el ID de la conversación creada.");
+
+        console.log(`LOG (DB): Nueva conversación creada con ID: ${createdId}`);
+        return createdId;
+    } catch (error) {
+        console.error(`ERROR (DB) en getOrCreateConversation para cliente ${clientId}:`, error);
+        return null; // Indicar error
+    }
+}
+
+// ... (Si necesitas getClientConfig, impleméntala aquí usando supabase)
+// export async function getClientConfig(clientId) { ... }
