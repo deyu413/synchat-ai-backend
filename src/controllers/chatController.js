@@ -65,7 +65,7 @@ async function generateRAGResponse(clientId, question, history = []) {
 /**
  * Manejador para POST /api/chat/start
  */
-export const startConversation = async (req, res) => {
+export { handleChatMessage, startConversation }; // Exportar como named exports
     const { clientId } = req.body;
     console.log(`LOG (Controller): Recibida petición /start para cliente ${clientId}`);
     if (!clientId) {
@@ -87,7 +87,6 @@ export const startConversation = async (req, res) => {
         console.error('Error en startConversation:', error);
         res.status(500).json({ error: 'Error interno al iniciar conversación' });
     }
-};
 
 /**
  * Manejador para POST /api/chat/message
@@ -141,4 +140,3 @@ export const handleChatMessage = async (req, res) => {
 };
 
 // Asegúrate de exportar ambas funciones si tu router las necesita así
-export { handleChatMessage, startConversation }; // Exportar como named exports
