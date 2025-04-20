@@ -2,76 +2,87 @@
 import 'dotenv/config';
 import express from 'express';
 import cors from 'cors';
-import apiRoutes from './src/routes/api.js';
+import apiRoutes from './src/routes/api.js'; // Asegúrate que la ruta sea correcta
 
 const app = express();
 const PORT = process.env.PORT || 3001;
 
-// 1. Configuración mejorada de orígenes con regex
+// --- Configuración CORS ---
 const allowedOrigins = [
     /^https?:\/\/(.*\.)?synchatai\.com$/, // Todos los subdominios
     /^https?:\/\/synchat-ai-backend\.vercel\.app$/, // Dominio de Vercel
-    process.env.NODE_ENV === 'development' && /^http:\/\/localhost(:\d+)?$/ // Localhost en desarrollo
-];
+    process.env.NODE_ENV === 'development' ? /^http:\/\/localhost(:\d+)?$/ : null // Localhost en desarrollo
+].filter(Boolean); // Filtrar null si no estamos en desarrollo
 
-// 2. Opciones CORS optimizadas
 const corsOptions = {
     origin: (origin, callback) => {
-        if (!origin) return callback(null, true); // Permitir herramientas sin origen (Postman)
-        
-        const isAllowed = allowedOrigins.some(pattern => 
-            typeof pattern === 'string' 
-                ? origin === pattern 
-                : pattern.test(origin)
-        );
-        
-        isAllowed 
-            ? callback(null, true)
-            : callback(new Error(`Origen bloqueado por CORS: ${origin}`));
+        // Permite solicitudes sin 'origin' (como Postman, curl) o si el origen está en la lista
+        if (!origin || allowedOrigins.some(pattern => pattern.test(origin))) {
+            callback(null, true);
+        } else {
+            console.warn(`CORS Bloqueado: Origen -> ${origin}`); // Loguea el origen bloqueado
+            callback(new Error('Origen no permitido por CORS'));
+        }
     },
-    methods: ['GET', 'POST', 'OPTIONS'], // Solo métodos necesarios
-    allowedHeaders: [
-        'Content-Type', 
-        'Authorization', 
-        'X-Requested-With',
-        'X-API-Key' // Añadir cabeceras personalizadas
-    ],
+    methods: ['GET', 'POST', 'OPTIONS'], // Métodos necesarios (incluye OPTIONS)
+    allowedHeaders: ['Content-Type', 'Authorization', 'X-Requested-With', 'X-API-Key'], // Cabeceras que usas
     credentials: true,
-    optionsSuccessStatus: 200 // Específicamente para Safari
+    optionsSuccessStatus: 200 // Para navegadores 'quisquillosos'
 };
 
-// 3. Manejo explícito de OPTIONS
-app.options('*', cors(corsOptions)); // Manejar todas las preflight requests
+// --- Middlewares ---
 
-// 4. Orden CRÍTICO de middlewares
+// 1. Manejar TODAS las peticiones OPTIONS (preflight) PRIMERO
+app.options('*', cors(corsOptions));
+
+// 2. Aplicar CORS globalmente a TODAS las demás peticiones ANTES de cualquier otra cosa
+app.use(cors(corsOptions));
+
+// 3. Body Parsers DESPUÉS de CORS global
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
-app.use(cors(corsOptions)); // Aplicar CORS después de body parsers
 
-// 5. Middleware de logging mejorado
+// 4. Logging
 app.use((req, res, next) => {
-    console.log(`${new Date().toISOString()} - ${req.method} ${req.path} [CORS: ${req.headers.origin}]`);
+    console.log(`${new Date().toISOString()} - ${req.method} ${req.path} [Origin: ${req.headers.origin || 'N/A'}]`);
     next();
 });
 
-// 6. Configuración específica de rutas API
-app.use('/api/chat', cors(corsOptions), apiRoutes); // Aplicar CORS solo a estas rutas
-
-// 7. Endpoint raíz con validación CORS
-app.get('/', cors(corsOptions), (req, res) => {
+// --- Rutas ---
+// Ya no necesitas aplicar cors() aquí porque se aplica globalmente arriba
+app.get('/', (req, res) => {
     res.status(200).send('¡Backend operativo!');
 });
 
-// 8. Manejo de errores mejorado
-app.use((err, req, res, next) => {
-    if (err.message.startsWith('Origen bloqueado')) {
-        console.warn(`Violación CORS: ${err.message}`);
-        return res.status(403).json({ 
-            error: 'Acceso no autorizado',
-            allowedOrigins: allowedOrigins.map(p => p.toString())
-        });
-    }
-    // ... resto del manejo de errores
+app.use('/api/chat', apiRoutes); // Montar las rutas de la API
+
+// --- Manejo de Errores (al final) ---
+// Ruta no encontrada (404)
+app.use((req, res, next) => {
+     res.status(404).json({ error: 'Ruta no encontrada' });
 });
 
-// Resto del código sin cambios...
+// Manejador de errores global
+app.use((err, req, res, next) => {
+    if (err.message === 'Origen no permitido por CORS') {
+        console.warn(`Violación CORS Final: ${err.message}`);
+        return res.status(403).json({
+            error: 'Acceso CORS denegado para este origen.',
+            // Opcional: Devolver los orígenes permitidos puede ayudar a depurar el frontend
+            // allowedOrigins: allowedOrigins.map(p => p.toString())
+        });
+    }
+
+    console.error("Error no manejado:", err.stack || err);
+    res.status(500).json({ error: 'Error interno del servidor' });
+});
+
+
+// --- Exportar app y Arranque Local ---
+export default app;
+
+if (process.env.NODE_ENV !== 'production' || !process.env.VERCEL) {
+     app.listen(PORT, () => {
+        console.log(`Servidor escuchando LOCALMENTE en el puerto ${PORT}`);
+     });
+}
