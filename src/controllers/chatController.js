@@ -1,47 +1,35 @@
 // src/controllers/chatController.js
 import { getChatCompletion } from '../services/openaiService.js';
-import * as db from '../services/databaseService.js'; // Importar todo como db
+import * as db from '../services/databaseService.js';
 
 // Modelo de IA a usar y Temperatura
 const CHAT_MODEL = "gpt-3.5-turbo";
-const CHAT_TEMPERATURE = 0.3;
+const CHAT_TEMPERATURE = 0.3; // Más baja para reducir alucinaciones
 
 /**
- * Maneja la recepción de un nuevo mensaje de chat desde el Widget.
- * Autentica usando X-API-Key header.
+ * Maneja la recepción de un nuevo mensaje de chat.
  */
 export const handleChatMessage = async (req, res, next) => {
-    const { message, conversationId } = req.body; // Ya NO viene clientId
-    const apiKey = req.headers['x-api-key'];      // Leer API Key de la cabecera
+    const { message, conversationId, clientId } = req.body;
 
-    // Validar entradas básicas
-    if (!message || !conversationId) {
-        return res.status(400).json({ error: 'Faltan datos requeridos (message, conversationId).' });
-    }
-    if (!apiKey) {
-        return res.status(401).json({ error: 'Falta API Key (X-API-Key header).' });
+    if (!message || !conversationId || !clientId) {
+        console.warn('Petición inválida a /message:', req.body);
+        return res.status(400).json({ error: 'Faltan datos requeridos (message, conversationId, clientId).' });
     }
 
-    console.log(`(Controller) Mensaje recibido CV:${conversationId} (API Key: ...${apiKey.slice(-6)}): "${message.substring(0, 100)}..."`);
+    console.log(`(Controller) Mensaje recibido C:${clientId}, CV:${conversationId}: "${message.substring(0, 100)}..."`);
 
     try {
-        // --- Autenticar API Key y obtener userId ---
-        const userId = await db.getUserIdByApiKey(apiKey); // Usa la nueva función
-        if (!userId) {
-            console.warn(`(Controller) API Key inválida o no encontrada: ...${apiKey.slice(-6)}`);
-            return res.status(403).json({ error: 'API Key inválida o no autorizada.' });
-        }
-        console.log(`(Controller) API Key validada para User ID: ${userId}`);
-
-        // --- Cache (Usar userId en la clave) ---
-        const cacheKey = `${userId}:${conversationId}:${message}`; // Clave con userId
+        // --- Cache ---
+        const cacheKey = `${clientId}:${conversationId}:${message}`;
         const cachedReply = db.getCache(cacheKey);
         if (cachedReply) {
+            // Guardar mensajes incluso si la respuesta es de caché (no bloqueante)
             Promise.all([
                  db.saveMessage(conversationId, 'user', message),
                  db.saveMessage(conversationId, 'bot', cachedReply)
             ]).catch(err => console.error("Error guardando mensajes (cache hit):", err));
-            return res.status(200).json({ reply: cachedReply });
+             return res.status(200).json({ reply: cachedReply });
         }
 
         console.log("(Controller) No encontrado en caché. Procesando...");
@@ -49,16 +37,18 @@ export const handleChatMessage = async (req, res, next) => {
         // --- Obtener Historial ---
         const conversationHistory = await db.getConversationHistory(conversationId);
         console.log(`(Controller) Historial recuperado: ${conversationHistory.length} mensajes.`);
+        // Nota: clientConfig se carga en startConversation para validación,
+        // pero el prompt ahora es específico para SynChat AI y no usa clientConfig.base_prompt
 
-        // --- Búsqueda Híbrida (RAG) - Usar userId ---
-        const relevantKnowledge = await db.hybridSearch(userId, message); // Pasar userId
+        // --- Búsqueda Híbrida (RAG) ---
+        const relevantKnowledge = await db.hybridSearch(clientId, message);
         let ragContext = "";
         if (relevantKnowledge && relevantKnowledge.length > 0) {
              console.log(`(Controller) ${relevantKnowledge.length} fragmentos RAG encontrados.`);
-             // ... (lógica para formatear ragContext igual que antes) ...
-              ragContext = relevantKnowledge
+             ragContext = relevantKnowledge
                 .map(chunk => {
                      const sourceInfo = chunk.metadata?.hierarchy?.join(" > ") || chunk.metadata?.url || '';
+                     // Añadir prefijo solo si hay sourceInfo
                      const prefix = sourceInfo ? `Fuente: ${sourceInfo}\n` : '';
                      return `${prefix}Contenido: ${chunk.content}`;
                  })
@@ -67,8 +57,15 @@ export const handleChatMessage = async (req, res, next) => {
              console.log("(Controller) No se encontraron fragmentos RAG relevantes.");
         }
 
-        // --- Construir Prompt del Sistema (igual que antes) ---
-        const systemPromptBase = `Eres Zoe, el asistente virtual IA especializado de SynChat AI... (resto del prompt igual)`; // Asegúrate que tu prompt esté completo aquí
+        // --- Construir Prompt del Sistema MEJORADO ---
+        const systemPromptBase = `Eres Zoe, el asistente virtual IA especializado de SynChat AI (synchatai.com). Tu ÚNICA fuente de información es el "Contexto" proporcionado a continuación. NO debes usar ningún conocimiento externo ni hacer suposiciones.
+
+Instrucciones ESTRICTAS:
+1.  Responde SOLAMENTE basándote en la información encontrada en el "Contexto".
+2.  Si la respuesta a la pregunta del usuario se encuentra en el "Contexto", respóndela de forma clara y concisa (máximo 3-4 frases). Cita la fuente si es relevante usando la información de "Fuente:" del contexto.
+3.  Si la información necesaria para responder NO se encuentra en el "Contexto", responde EXACTAMENTE con: "Lo siento, no tengo información específica sobre eso en la base de datos de SynChat AI." NO intentes adivinar ni buscar en otro lado.
+4.  Sé amable y profesional.`;
+
         const finalSystemPrompt = systemPromptBase +
             (ragContext ? `\n\n--- Contexto ---\n${ragContext}\n--- Fin del Contexto ---` : '\n\n(No se encontró contexto relevante para esta pregunta)');
 
@@ -80,7 +77,7 @@ export const handleChatMessage = async (req, res, next) => {
         ];
 
         // --- Llamar a OpenAI ---
-        console.log(`(Controller) Enviando ${messagesForAPI.length} mensajes a OpenAI...`);
+        console.log(`(Controller) Enviando ${messagesForAPI.length} mensajes a OpenAI (Modelo: ${CHAT_MODEL}, Temp: ${CHAT_TEMPERATURE}).`);
         const botReplyText = await getChatCompletion(messagesForAPI, CHAT_MODEL, CHAT_TEMPERATURE);
 
         // --- Procesar Respuesta y Guardar ---
@@ -92,7 +89,7 @@ export const handleChatMessage = async (req, res, next) => {
                  console.error(`Error no crítico al guardar mensajes para ${conversationId}:`, saveError);
             });
 
-            db.setCache(cacheKey, botReplyText); // Usar la clave con userId
+            db.setCache(cacheKey, botReplyText);
             res.status(200).json({ reply: botReplyText });
         } else {
             console.error(`(Controller) Respuesta vacía o nula de OpenAI para ${conversationId}`);
@@ -100,49 +97,49 @@ export const handleChatMessage = async (req, res, next) => {
         }
 
     } catch (error) {
-        // Asegurarse de no enviar el userId en errores genéricos al cliente
-        console.error(`(Controller) Error general en handleChatMessage para CV ${conversationId}:`, error);
-        next(error); // Pasar al middleware de errores global
-    }
-};
-
-/**
- * Inicia una nueva conversación para un cliente (llamado por el Widget).
- * Autentica usando X-API-Key header.
- */
-export const startConversation = async (req, res, next) => {
-    console.log('>>> chatController.js: DENTRO de startConversation (Widget)');
-    const apiKey = req.headers['x-api-key']; // Leer API Key de la cabecera
-
-    if (!apiKey) {
-        console.warn('Petición inválida a /start. Falta X-API-Key.');
-        return res.status(401).json({ error: 'Falta API Key (X-API-Key header).' });
-    }
-
-    try {
-        // --- Autenticar API Key y obtener userId ---
-        const userId = await db.getUserIdByApiKey(apiKey);
-        if (!userId) {
-            console.warn(`(Controller) /start - API Key inválida o no encontrada: ...${apiKey.slice(-6)}`);
-            return res.status(403).json({ error: 'API Key inválida o no autorizada.' });
-        }
-        console.log(`(Controller) /start - API Key validada para User ID: ${userId}`);
-
-        // --- Crear una nueva conversación ---
-        // Pasamos el userId obtenido a la función (que también modificamos)
-        const conversationId = await db.getOrCreateConversation(userId);
-        console.log(`(Controller) /start - Conversación iniciada/creada: ${conversationId} para userId ${userId}`);
-
-        res.status(201).json({ conversationId }); // 201 Created
-
-    } catch (error) {
-        console.error(`Error en startConversation (Widget) para API Key ...${apiKey.slice(-6)}:`, error);
+        console.error(`(Controller) Error general en handleChatMessage para ${conversationId}:`, error);
         next(error);
     }
 };
 
-// Exportar ambas funciones
+/**
+ * Inicia una nueva conversación para un cliente.
+ * ¡¡ESTA ES LA FUNCIÓN QUE FALTABA DEFINIR!!
+ */
+export const startConversation = async (req, res, next) => {
+    console.log('>>> chatController.js: DENTRO de startConversation');
+    const { clientId } = req.body;
+
+    if (!clientId) {
+        console.warn('Petición inválida a /start. Falta clientId.');
+        return res.status(400).json({ error: 'Falta clientId.' });
+    }
+
+    try {
+        // Verificar si el cliente existe (buena práctica)
+        const clientExists = await db.getClientConfig(clientId);
+        if (!clientExists) {
+            console.warn(`Intento de iniciar conversación para cliente inexistente: ${clientId}`);
+            return res.status(404).json({ error: 'Cliente inválido o no encontrado.' });
+        }
+
+        // Crear una nueva conversación
+        const conversationId = await db.getOrCreateConversation(clientId);
+        console.log(`(Controller) Conversación iniciada/creada: ${conversationId} para cliente ${clientId}`);
+
+        res.status(201).json({ conversationId }); // 201 Created
+
+    } catch (error) {
+        console.error(`Error en startConversation para cliente ${clientId}:`, error);
+        next(error); // Pasar al middleware de errores
+    }
+};
+
+
+// --- Exportar AMBAS funciones ---
 export default {
     handleChatMessage,
-    startConversation
+    startConversation // Ahora sí está definida antes de exportarla
 };
+
+// Ahora sí está definida antes de exportarla// Ahora sí está definida antes de exportarla
